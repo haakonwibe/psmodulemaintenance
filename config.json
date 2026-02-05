@@ -1,0 +1,12 @@
+{
+  "$schema": "./config.schema.json",
+  "_comment": "Configuration for PSModuleMaintenance",
+  
+  "ExcludedModules": [
+    
+  ],
+  
+  "LogRetentionDays": 180,
+  
+  "TrustPSGallery": true
+}

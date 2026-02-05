@@ -1,0 +1,6 @@
+# Logs folder for internal development
+logs/
+
+# Local development
+.claude/
+.vscode/
