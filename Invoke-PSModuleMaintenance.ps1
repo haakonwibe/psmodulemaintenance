@@ -61,6 +61,7 @@ $script:Config = @{
     ExcludedModules = @()
     LogRetentionDays = 180
     TrustPSGallery = $true
+    NotificationMode = 'Always'
 }
 
 function Import-MaintenanceConfig {
@@ -84,7 +85,10 @@ function Import-MaintenanceConfig {
             if ($null -ne $jsonConfig.TrustPSGallery) {
                 $script:Config.TrustPSGallery = $jsonConfig.TrustPSGallery
             }
-            
+            if ($null -ne $jsonConfig.NotificationMode) {
+                $script:Config.NotificationMode = $jsonConfig.NotificationMode
+            }
+
             Write-Verbose "Loaded configuration from: $Path"
         }
         catch {
@@ -194,6 +198,95 @@ function Remove-OldLogs {
     if ($oldFiles) {
         Write-Log "Removing $($oldFiles.Count) log files older than $RetentionDays days"
         $oldFiles | Remove-Item -Force -ErrorAction SilentlyContinue
+    }
+}
+
+# ============================================================================
+# TOAST NOTIFICATIONS
+# ============================================================================
+
+function Send-ToastNotification {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [hashtable]$Summary,
+
+        [switch]$SkippedUpdates,
+
+        [switch]$SkippedPruning
+    )
+
+    try {
+        # Build the notification message from summary data
+        $parts = @()
+
+        if (-not $SkippedUpdates) {
+            $updateText = "Updated $($Summary.ModulesUpdated) modules"
+            if ($Summary.ModulesFailed.Count -gt 0) {
+                $updateText += ", $($Summary.ModulesFailed.Count) failed"
+            }
+            $parts += $updateText
+        }
+
+        if (-not $SkippedPruning) {
+            $pruneText = "Pruned $($Summary.VersionsPruned) versions"
+            if ($Summary.PrunesFailed.Count -gt 0) {
+                $pruneText += ", $($Summary.PrunesFailed.Count) failed"
+            }
+            $parts += $pruneText
+        }
+
+        $hasFailures = ($Summary.ModulesFailed.Count -gt 0) -or ($Summary.PrunesFailed.Count -gt 0)
+
+        $message = ($parts -join '. ') + '.'
+        if (-not $hasFailures) {
+            $message += ' No errors.'
+        }
+
+        # Use Windows PowerShell (5.1) for native WinRT toast support — always present on Windows 10/11
+        $xmlMessage = [System.Security.SecurityElement]::Escape($message)
+
+        $toastScript = @"
+`$ErrorActionPreference = 'Stop'
+try {
+    [Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] | Out-Null
+    [Windows.Data.Xml.Dom.XmlDocument, Windows.Data.Xml.Dom.XmlDocument, ContentType = WindowsRuntime] | Out-Null
+
+    `$toastXml = @'
+<toast>
+    <visual>
+        <binding template="ToastGeneric">
+            <text>PSModuleMaintenance</text>
+            <text>$xmlMessage</text>
+        </binding>
+    </visual>
+    <audio src="ms-winsoundevent:Notification.Default"/>
+</toast>
+'@
+
+    `$xmlDoc = New-Object Windows.Data.Xml.Dom.XmlDocument
+    `$xmlDoc.LoadXml(`$toastXml)
+    `$toast = New-Object Windows.UI.Notifications.ToastNotification(`$xmlDoc)
+    `$notifier = [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('Windows.SystemToast.SecurityAndMaintenance')
+    `$notifier.Show(`$toast)
+}
+catch {
+    exit 1
+}
+"@
+
+        $encoded = [Convert]::ToBase64String([System.Text.Encoding]::Unicode.GetBytes($toastScript))
+        powershell.exe -NoProfile -NonInteractive -WindowStyle Hidden -EncodedCommand $encoded
+
+        if ($LASTEXITCODE -eq 0) {
+            Write-Log "Toast notification sent: $message"
+        }
+        else {
+            Write-Log "Toast notification subprocess exited with code $LASTEXITCODE" -Level WARN
+        }
+    }
+    catch {
+        Write-Log "Toast notification failed: $_" -Level WARN
     }
 }
 
@@ -354,6 +447,7 @@ try {
     Write-Log "  - Excluded modules: $($script:Config.ExcludedModules.Count)"
     Write-Log "  - Log retention: $($script:Config.LogRetentionDays) days"
     Write-Log "  - Trust PSGallery: $($script:Config.TrustPSGallery)"
+    Write-Log "  - Notification mode: $($script:Config.NotificationMode)"
 
     # Clean up old logs
     Remove-OldLogs -BasePath $LogPath -RetentionDays $script:Config.LogRetentionDays
@@ -378,6 +472,14 @@ catch {
 finally {
     # Save summary
     Save-Summary -BasePath $LogPath
+
+    # Send toast notification based on config
+    $notifyMode = $script:Config.NotificationMode
+    $hasFailures = ($script:Summary.ModulesFailed.Count -gt 0) -or ($script:Summary.PrunesFailed.Count -gt 0)
+
+    if ($notifyMode -eq 'Always' -or ($notifyMode -eq 'OnFailure' -and $hasFailures)) {
+        Send-ToastNotification -Summary $script:Summary -SkippedUpdates:$PruneOnly -SkippedPruning:$UpdateOnly
+    }
 
     # Stop transcript
     Stop-Transcript -ErrorAction SilentlyContinue | Out-Null

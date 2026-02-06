@@ -36,11 +36,12 @@ PSModuleMaintenance is a Windows-based automation tool that keeps PowerShell mod
 
 ## Architecture
 
-**Invoke-PSModuleMaintenance.ps1** - Main maintenance script with four sections:
+**Invoke-PSModuleMaintenance.ps1** - Main maintenance script with five sections:
 1. Configuration - Loads `config.json`, merges with defaults
 2. Logging - Initializes log files, transcript, and summary tracking
-3. Module Operations - `Update-AllModules` and `Remove-OldModuleVersions` functions
-4. Main Execution - Orchestrates the workflow with try/finally for cleanup
+3. Toast Notifications - `Send-ToastNotification` function (shells out to PS 5.1 for WinRT support)
+4. Module Operations - `Update-AllModules` and `Remove-OldModuleVersions` functions
+5. Main Execution - Orchestrates the workflow with try/finally for cleanup
 
 **Install-ModuleMaintenance.ps1** - Creates Windows Scheduled Task that runs the maintenance script weekly as the current user with elevated privileges.
 
@@ -48,6 +49,7 @@ PSModuleMaintenance is a Windows-based automation tool that keeps PowerShell mod
 - `ExcludedModules`: Array of module names to skip
 - `LogRetentionDays`: How long to keep logs (default 180)
 - `TrustPSGallery`: Trust repository during updates (default true)
+- `NotificationMode`: Toast notifications — `Always` (default), `OnFailure`, or `Never`
 
 ## Key Implementation Details
 

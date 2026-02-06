@@ -8,5 +8,7 @@
   
   "LogRetentionDays": 180,
   
-  "TrustPSGallery": true
+  "TrustPSGallery": true,
+
+  "NotificationMode": "Always"
 }

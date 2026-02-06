@@ -9,6 +9,7 @@ Automated PowerShell module maintenance for Windows. Updates all PSResourceGet-m
 - 📋 **Comprehensive Logging** — Structured logs with transcripts and JSON summaries
 - ⚙️ **Configurable Exclusions** — Skip specific modules via config file
 - ⏰ **Scheduled Execution** — Runs weekly via Windows Task Scheduler
+- 🔔 **Toast Notifications** — Optional Windows toast notifications after each run
 - 🔒 **CurrentUser Scope** — Runs as your account for OneDrive-synced module paths
 
 ## Requirements
@@ -85,6 +86,17 @@ Run the maintenance script directly:
 | `ExcludedModules` | string[] | `[]` | Module names to skip during updates and pruning |
 | `LogRetentionDays` | int | `180` | Days to keep log files before auto-cleanup |
 | `TrustPSGallery` | bool | `true` | Trust PSGallery during updates (avoids prompts) |
+| `NotificationMode` | string | `"Always"` | Toast notifications: `"Always"`, `"OnFailure"`, or `"Never"` |
+
+## Notifications
+
+PSModuleMaintenance can show a Windows toast notification after each run. Set `NotificationMode` in `config.json`:
+
+- **`"Always"`** — Notification after every run with a summary of updates and pruning (default)
+- **`"OnFailure"`** — Notification only when modules fail to update or versions fail to prune
+- **`"Never"`** — No notifications
+
+The toast uses the built-in Windows "Security and Maintenance" notification channel — no additional setup required.
 
 ## Logs
 
@@ -134,6 +146,7 @@ Remove-Item "$env:ProgramData\PSModuleMaintenance" -Recurse -Force
 4. **Update Modules** — Bulk checks PSGallery for available updates, then only updates modules that have newer versions
 5. **Prune Versions** — Groups modules by name, keeps newest, removes the rest (detects OneDrive and warns about potential popups)
 6. **Save Summary** — Writes JSON summary for monitoring/alerting integration
+7. **Toast Notification** — Shows a Windows toast with the run summary (if enabled via `NotificationMode`)
 
 ## Troubleshooting
 

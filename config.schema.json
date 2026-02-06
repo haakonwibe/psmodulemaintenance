@@ -34,6 +34,12 @@
       "type": "boolean",
       "description": "Whether to trust PSGallery repository during updates",
       "default": true
+    },
+    "NotificationMode": {
+      "type": "string",
+      "description": "When to show Windows toast notifications: Always, OnFailure, or Never",
+      "enum": ["Always", "OnFailure", "Never"],
+      "default": "Always"
     }
   },
   "additionalProperties": false
