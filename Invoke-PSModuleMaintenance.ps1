@@ -235,7 +235,12 @@ function Update-AllModules {
     $needsUpdate = @()
     foreach ($mod in $installed) {
         $galleryVersion = ($gallery | Where-Object Name -eq $mod.Name | Sort-Object Version -Descending | Select-Object -First 1).Version
-        if ($galleryVersion -and $galleryVersion -gt $mod.Version) {
+        # Normalize versions to 4-part form so 6.1907.1 and 6.1907.1.0 compare as equal
+        if ($galleryVersion -and $mod.Version) {
+            $normalizedInstalled = [version]::new($mod.Version.Major, $mod.Version.Minor, [Math]::Max($mod.Version.Build, 0), [Math]::Max($mod.Version.Revision, 0))
+            $normalizedGallery = [version]::new($galleryVersion.Major, $galleryVersion.Minor, [Math]::Max($galleryVersion.Build, 0), [Math]::Max($galleryVersion.Revision, 0))
+        }
+        if ($galleryVersion -and $normalizedGallery -gt $normalizedInstalled) {
             $needsUpdate += [PSCustomObject]@{
                 Name = $mod.Name
                 InstalledVersion = $mod.Version
