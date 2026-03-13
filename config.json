@@ -12,5 +12,5 @@
 
   "NotificationMode": "Always",
 
-  "MigrateFromOneDrive": true
+  "MigrateFromOneDrive": false
 }

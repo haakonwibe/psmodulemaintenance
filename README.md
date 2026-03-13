@@ -40,7 +40,7 @@ Edit `config.json` to exclude specific modules:
   "LogRetentionDays": 180,
   "TrustPSGallery": true,
   "NotificationMode": "Always",
-  "MigrateFromOneDrive": true
+  "MigrateFromOneDrive": false
 }
 ```
 
@@ -92,7 +92,7 @@ Run the maintenance script directly:
 | `LogRetentionDays` | int | `180` | Days to keep log files before auto-cleanup |
 | `TrustPSGallery` | bool | `true` | Trust PSGallery during updates (avoids prompts) |
 | `NotificationMode` | string | `"Always"` | Toast notifications: `"Always"`, `"OnFailure"`, or `"Never"` |
-| `MigrateFromOneDrive` | bool | `true` | Migrate modules from OneDrive to AllUsers scope (see below) |
+| `MigrateFromOneDrive` | bool | `false` | Migrate modules from OneDrive to AllUsers scope (see below) |
 
 ## Notifications
 
@@ -159,7 +159,7 @@ PowerShell 7 installs CurrentUser-scope modules to `$HOME\Documents\PowerShell\M
 
 ### The Solution
 
-When `MigrateFromOneDrive` is enabled (default), the script automatically:
+When `MigrateFromOneDrive` is enabled, the script automatically:
 
 1. **Detects** if your CurrentUser module path is inside a OneDrive-synced folder
 2. **Copies** all modules to AllUsers scope (`$env:ProgramFiles\PowerShell\Modules`) — safely, without deleting the originals
@@ -179,7 +179,7 @@ The migration is **idempotent and gradual** — modules that already exist at th
 .\Invoke-PSModuleMaintenance.ps1
 ```
 
-To disable migration, set `"MigrateFromOneDrive": false` in `config.json`. When disabled, or when the module path is not in OneDrive, the script behaves exactly as before.
+To enable migration, set `"MigrateFromOneDrive": true` in `config.json`. When disabled (the default), or when the module path is not in OneDrive, the script behaves exactly as before.
 
 ## How It Works
 

@@ -71,7 +71,7 @@ $script:Config = @{
     LogRetentionDays = 180
     TrustPSGallery = $true
     NotificationMode = 'Always'
-    MigrateFromOneDrive = $true
+    MigrateFromOneDrive = $false
 }
 
 function Import-MaintenanceConfig {

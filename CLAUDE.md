@@ -54,7 +54,7 @@ PSModuleMaintenance is a Windows-based automation tool that keeps PowerShell mod
 - `LogRetentionDays`: How long to keep logs (default 180)
 - `TrustPSGallery`: Trust repository during updates (default true)
 - `NotificationMode`: Toast notifications — `Always` (default), `OnFailure`, or `Never`
-- `MigrateFromOneDrive`: Migrate modules from OneDrive to AllUsers scope (default true)
+- `MigrateFromOneDrive`: Migrate modules from OneDrive to AllUsers scope (default false)
 
 ## Key Implementation Details
 
