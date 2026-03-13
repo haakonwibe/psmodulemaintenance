@@ -65,8 +65,11 @@ This creates a weekly task running Sundays at 3:00 AM.
 Run the maintenance script directly:
 
 ```powershell
-# Full maintenance (migrate + update + prune)
+# Full maintenance (update + prune)
 .\Invoke-PSModuleMaintenance.ps1
+
+# Full maintenance with OneDrive migration
+.\Invoke-PSModuleMaintenance.ps1 -MigrateFromOneDrive
 
 # Update only
 .\Invoke-PSModuleMaintenance.ps1 -UpdateOnly
@@ -75,7 +78,7 @@ Run the maintenance script directly:
 .\Invoke-PSModuleMaintenance.ps1 -PruneOnly
 
 # Migrate modules out of OneDrive only (no updates or pruning)
-.\Invoke-PSModuleMaintenance.ps1 -MigrateOnly
+.\Invoke-PSModuleMaintenance.ps1 -MigrateOnly -MigrateFromOneDrive
 
 # Dry run - see what would happen
 .\Invoke-PSModuleMaintenance.ps1 -WhatIf
