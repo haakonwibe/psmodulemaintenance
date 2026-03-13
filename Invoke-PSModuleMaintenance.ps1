@@ -525,7 +525,9 @@ function Update-AllModules {
     }
 
     # Get installed modules (newest version of each)
-    $installed = Get-PSResource |
+    # When OneDrive is detected, modules live in AllUsers scope — query that explicitly
+    $getParams = if ($useAllUsersScope) { @{ Scope = 'AllUsers' } } else { @{} }
+    $installed = Get-PSResource @getParams |
         Where-Object { $_.Name -notin $script:Config.ExcludedModules } |
         Group-Object Name |
         ForEach-Object {
@@ -651,7 +653,9 @@ function Remove-OldModuleVersions {
     $currentUserModulePath = Join-Path ([Environment]::GetFolderPath('MyDocuments')) 'PowerShell\Modules'
     $isOneDrive = Test-OneDrivePath $currentUserModulePath
 
-    $allModules = Get-PSResource | Where-Object { $_.Name -notin $script:Config.ExcludedModules }
+    # When OneDrive is detected, modules live in AllUsers scope — query that explicitly
+    $getParams = if ($isOneDrive) { @{ Scope = 'AllUsers' } } else { @{} }
+    $allModules = Get-PSResource @getParams | Where-Object { $_.Name -notin $script:Config.ExcludedModules }
 
     # --- Pass 1: Remove old versions of AllUsers modules (keep latest) ---
     if ($isOneDrive) {
