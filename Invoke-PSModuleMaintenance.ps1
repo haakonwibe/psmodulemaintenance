@@ -721,12 +721,19 @@ function Remove-OldModuleVersions {
                     }
                     catch {
                         $errorMsg = $_.Exception.Message
-                        $folderPath = $odModule.InstalledLocation
 
-                        if ($folderPath -and (Test-Path $folderPath) -and
+                        # Build the expected version folder path explicitly — InstalledLocation
+                        # sometimes returns the parent Modules directory instead of the version folder
+                        $versionFolderPath = Join-Path $currentUserModulePath $odModule.Name $odModule.Version.ToString()
+                        if (-not (Test-Path $versionFolderPath)) {
+                            # Fall back to InstalledLocation if our constructed path doesn't exist
+                            $versionFolderPath = $odModule.InstalledLocation
+                        }
+
+                        if ($versionFolderPath -and (Test-Path $versionFolderPath) -and
                             ($errorMsg -match 'Access.*denied|could not be deleted|Cannot remove')) {
                             Write-Log "OneDrive lock on $($odModule.Name) — attempting force-removal" -Level WARN
-                            if (Remove-LockedModuleFolder -FolderPath $folderPath) {
+                            if (Remove-LockedModuleFolder -FolderPath $versionFolderPath) {
                                 $script:Summary.VersionsPruned++
                                 Write-Log "Force-removed OneDrive copy: $($odModule.Name) v$($odModule.Version)" -Level SUCCESS
                                 continue
