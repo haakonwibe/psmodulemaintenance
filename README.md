@@ -153,6 +153,7 @@ Remove-Item "$env:ProgramData\PSModuleMaintenance" -Recurse -Force
 PowerShell 7 installs CurrentUser-scope modules to `$HOME\Documents\PowerShell\Modules`. On enterprise devices with **Known Folder Move** enabled, the Documents folder is redirected to OneDrive. This causes OneDrive to sync module files, leading to:
 
 - **File locks** during sync that block `Update-PSResource` and `Uninstall-PSResource` with "Cannot remove package path" and "Access denied" errors
+- **Cloud placeholders** (reparse points) — OneDrive replaces local files with cloud-only stubs that standard file APIs cannot delete
 - **Deletion confirmation popups** when pruning old module versions
 - **Inability to exclude the folder** from sync on managed devices (organizational policy)
 
@@ -163,9 +164,9 @@ When `MigrateFromOneDrive` is enabled (default), the script automatically:
 1. **Detects** if your CurrentUser module path is inside a OneDrive-synced folder
 2. **Copies** all modules to AllUsers scope (`$env:ProgramFiles\PowerShell\Modules`) — safely, without deleting the originals
 3. **Updates** modules with `-Scope AllUsers` so new versions install outside OneDrive
-4. **Cleans up** the old OneDrive copies during the prune pass, with force-removal fallback for locked files
+4. **Cleans up** the old OneDrive copies during the prune pass, with four-stage force-removal for cloud placeholders and locked files (see [Troubleshooting](#onedrive-file-lock--cloud-placeholder-errors))
 
-The migration is **idempotent and gradual** — modules that already exist at the destination are skipped, and OneDrive copies that can't be removed due to sync locks are retried on the next run.
+The migration is **idempotent and gradual** — modules that already exist at the destination are skipped, and OneDrive copies that can't be removed are either force-deleted or scheduled for reboot deletion.
 
 ### Usage
 
@@ -187,7 +188,7 @@ To disable migration, set `"MigrateFromOneDrive": false` in `config.json`. When 
 3. **Clean Old Logs** — Removes logs older than retention period
 4. **Migrate Modules** — If OneDrive is detected on the module path, copies modules to AllUsers scope
 5. **Update Modules** — Bulk checks PSGallery for available updates, then only updates modules that have newer versions (targets AllUsers scope when OneDrive is detected)
-6. **Prune Versions** — Groups modules by name, keeps newest, removes the rest. When OneDrive is detected, also removes all migrated copies from the OneDrive path
+6. **Prune Versions** — Groups modules by name, keeps newest, removes the rest (skips built-in modules like PackageManagement). When OneDrive is detected, also removes all migrated copies from the OneDrive path
 7. **Save Summary** — Writes JSON summary for monitoring/alerting integration
 8. **Toast Notification** — Shows a Windows toast with the run summary (if enabled via `NotificationMode`)
 
@@ -211,15 +212,16 @@ Check the log files for specific errors. Common causes:
 
 The script requires Administrator privileges when using OneDrive migration (AllUsers scope). The scheduled task is configured to run with highest privileges. For manual runs, use an elevated PowerShell prompt.
 
-### OneDrive file lock errors
+### OneDrive file lock / cloud placeholder errors
 
-OneDrive can lock files during sync, causing "Cannot remove package path" or "Access denied" errors. The script handles this automatically:
+OneDrive can block file deletion in two ways: **sync locks** during active syncing, and **cloud placeholders** (reparse points) where OneDrive replaces local files with cloud-only stubs. Both cause "Access denied" errors. The script handles this with a four-stage escalation:
 
-- **Force-removal** with .NET garbage collection, attribute stripping, and two-pass deletion (bulk then file-by-file)
-- **Retry loop** for meta-packages like Az that hit multiple locked sub-module folders
-- **Graceful failure** — locked files that can't be removed are logged and retried on the next run
+1. **Normal deletion** — `Remove-Item -Recurse -Force`
+2. **Cloud attribute strip + `rd /s /q`** — Strips OneDrive cloud-file attributes (`attrib -P -U -O`) to convert placeholders back to normal files, then uses `cmd.exe rd /s /q` which handles reparse points differently than PowerShell's `Remove-Item`
+3. **File-by-file deletion** — Deletes individual files, skipping those still locked
+4. **Reboot-scheduled deletion** — Uses `kernel32.dll MoveFileEx` with `MOVEFILE_DELAY_UNTIL_REBOOT` to schedule remaining locked files for deletion by the Windows kernel on next reboot (before any user-mode process starts)
 
-If you see persistent lock errors on the same module across multiple runs, the module's .dll may be loaded in the current PowerShell session. Close all PowerShell windows and let the scheduled task handle it, or run from a fresh session.
+Most OneDrive cleanup completes at stage 2. Stage 4 is the nuclear option for truly stubborn files.
 
 ### OneDrive "large number of files deleted" warning
 

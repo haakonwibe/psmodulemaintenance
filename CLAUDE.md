@@ -59,12 +59,18 @@ PSModuleMaintenance is a Windows-based automation tool that keeps PowerShell mod
 ## Key Implementation Details
 
 - **Update optimization**: Bulk queries PSGallery via `Find-PSResource` to check for available updates, then only calls `Update-PSResource` for modules that actually need updating (avoids 150+ individual network calls)
+- **PSResourceGet scope pitfalls**: `Get-PSResource` without `-Scope` defaults to CurrentUser only — after OneDrive migration, modules live in AllUsers so `-Scope AllUsers` is required. `Uninstall-PSResource` without `-Scope` can target ANY scope, potentially removing AllUsers copies instead of OneDrive copies — the OneDrive cleanup pass uses direct folder deletion (`Remove-Item` / `Remove-LockedModuleFolder`) instead
 - **OneDrive migration**: When Documents is redirected to OneDrive via Known Folder Move, the script detects this by checking `[Environment]::GetFolderPath('MyDocuments')` against OneDrive environment variables, then:
   - Copies modules to `$env:ProgramFiles\PowerShell\Modules` (AllUsers scope)
   - Updates with `-Scope AllUsers` so new versions install outside OneDrive
   - Prunes all OneDrive copies in a dedicated cleanup pass
-  - Uses force-removal (`Remove-LockedModuleFolder`) with GC collection, attribute stripping, and two-pass deletion for OneDrive-locked files
-  - Retry loop handles meta-packages (e.g., Az) that hit multiple locked sub-module folders
+  - `Remove-LockedModuleFolder` uses four-stage escalation for stubborn OneDrive files:
+    1. Normal `Remove-Item -Recurse -Force`
+    2. Strip OneDrive cloud-file attributes (`attrib -P -U -O`) + `cmd.exe rd /s /q` (handles reparse points/cloud placeholders)
+    3. File-by-file deletion of whatever is deletable
+    4. `kernel32.dll MoveFileEx` with `MOVEFILE_DELAY_UNTIL_REBOOT` — schedules remaining files for kernel-level deletion on next reboot
+  - OneDrive cloud placeholders (reparse points) are the main blocker — files appear locally but are cloud-only stubs that standard file APIs reject with "Access denied"
+  - Built-in modules (e.g., PackageManagement) that ship under `$PSHOME` are automatically skipped during pruning — PSResourceGet cannot uninstall these
   - When OneDrive is NOT detected, all behavior is identical to pre-migration versions
 - Modules are grouped by name; only the latest version is kept during pruning
 - Logs go to `$env:ProgramData\PSModuleMaintenance\Logs` with three file types: structured log, full transcript, and JSON summary

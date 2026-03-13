@@ -438,8 +438,9 @@ function Move-ModulesToAllUsers {
 function Remove-LockedModuleFolder {
     <#
     .SYNOPSIS
-        Force-removes a module folder that OneDrive has locked by stripping file attributes first.
-        Only operates on folders that are inside a known PSModulePath and whose name is a valid version number.
+        Force-removes a module folder that OneDrive has locked or converted to cloud placeholders.
+        Escalation: normal Remove-Item → strip cloud attributes + rd /s /q → MoveFileEx reboot deletion.
+        Only operates on folders inside a known PSModulePath with a version-number name.
     #>
     [CmdletBinding()]
     param(
@@ -484,7 +485,7 @@ function Remove-LockedModuleFolder {
             [System.IO.File]::SetAttributes($_.FullName, [System.IO.FileAttributes]::Normal)
         }
         catch {
-            # Directories or already-deleted files — ignore
+            # Directories, reparse points, or already-deleted files — ignore
         }
     }
 
@@ -495,18 +496,84 @@ function Remove-LockedModuleFolder {
         return $true
     }
     catch {
-        Write-Log "Bulk Remove-Item failed, trying file-by-file removal: $_" -Level WARN
+        Write-Log "Bulk Remove-Item failed: $_" -Level WARN
     }
 
-    # Second attempt: delete individual files first, then remove the empty directory tree
-    try {
-        Get-ChildItem -Path $FolderPath -Recurse -Force | Remove-Item -Force -Recurse -ErrorAction SilentlyContinue
-        Remove-Item -Path $FolderPath -Force -Recurse -ErrorAction Stop
+    # Second attempt: strip OneDrive cloud-file attributes (Pinned/Unpinned/Offline),
+    # then use cmd.exe rd /s /q which handles reparse points differently than Remove-Item
+    $reparsePoints = Get-ChildItem -Path $FolderPath -Recurse -Force -ErrorAction SilentlyContinue |
+        Where-Object { $_.Attributes -band [System.IO.FileAttributes]::ReparsePoint }
+    if ($reparsePoints) {
+        Write-Log "Found $($reparsePoints.Count) OneDrive cloud placeholder(s) — stripping cloud attributes" -Level WARN
+        foreach ($rp in $reparsePoints) {
+            & cmd.exe /c "attrib -P -U -O `"$($rp.FullName)`"" 2>&1 | Out-Null
+        }
+    }
+    & cmd.exe /c "rd /s /q `"$FolderPath`"" 2>&1 | Out-Null
+    if (-not (Test-Path $FolderPath)) {
+        Write-Log "Force-removed folder (rd /s /q after cloud attribute strip): $FolderPath" -Level SUCCESS
+        return $true
+    }
+    Write-Log "rd /s /q could not fully remove folder — trying file-by-file + reboot fallback" -Level WARN
+
+    # Third attempt: delete what we can file-by-file, schedule the rest for reboot
+    Get-ChildItem -Path $FolderPath -Recurse -Force -File -ErrorAction SilentlyContinue |
+        Remove-Item -Force -ErrorAction SilentlyContinue
+
+    # Check if that was enough
+    if (-not (Test-Path $FolderPath) -or
+        @(Get-ChildItem -Path $FolderPath -Recurse -Force -ErrorAction SilentlyContinue).Count -eq 0) {
+        Remove-Item -Path $FolderPath -Force -Recurse -ErrorAction SilentlyContinue
         Write-Log "Force-removed folder (file-by-file): $FolderPath" -Level SUCCESS
         return $true
     }
-    catch {
-        Write-Log "Could not force-remove folder: $FolderPath — $_" -Level ERROR
+
+    # Fourth attempt: schedule remaining files for deletion on next reboot via kernel32 MoveFileEx
+    if (-not ('PSModuleMaintenance.FileUtils' -as [type])) {
+        Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+namespace PSModuleMaintenance {
+    public class FileUtils {
+        [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+        public static extern bool MoveFileEx(string lpExistingFileName, string lpNewFileName, int dwFlags);
+        public const int MOVEFILE_DELAY_UNTIL_REBOOT = 0x4;
+    }
+}
+"@
+    }
+
+    $scheduledCount = 0
+    $remainingFiles = Get-ChildItem -Path $FolderPath -Recurse -Force -File -ErrorAction SilentlyContinue
+    foreach ($file in $remainingFiles) {
+        $scheduled = [PSModuleMaintenance.FileUtils]::MoveFileEx(
+            $file.FullName, $null, [PSModuleMaintenance.FileUtils]::MOVEFILE_DELAY_UNTIL_REBOOT)
+        if ($scheduled) {
+            $scheduledCount++
+        }
+        else {
+            $win32Error = [System.Runtime.InteropServices.Marshal]::GetLastWin32Error()
+            Write-Log "MoveFileEx failed for $($file.FullName) — Win32 error $win32Error" -Level WARN
+        }
+    }
+
+    # Schedule directories for reboot deletion (deepest first so children go before parents)
+    $remainingDirs = Get-ChildItem -Path $FolderPath -Recurse -Force -Directory -ErrorAction SilentlyContinue |
+        Sort-Object { $_.FullName.Length } -Descending
+    foreach ($dir in $remainingDirs) {
+        [PSModuleMaintenance.FileUtils]::MoveFileEx(
+            $dir.FullName, $null, [PSModuleMaintenance.FileUtils]::MOVEFILE_DELAY_UNTIL_REBOOT) | Out-Null
+    }
+    # Schedule the root version folder itself
+    [PSModuleMaintenance.FileUtils]::MoveFileEx(
+        $FolderPath, $null, [PSModuleMaintenance.FileUtils]::MOVEFILE_DELAY_UNTIL_REBOOT) | Out-Null
+
+    if ($scheduledCount -gt 0) {
+        Write-Log "Scheduled $scheduledCount locked file(s) for deletion on next reboot: $FolderPath" -Level WARN
+        return $true
+    }
+    else {
+        Write-Log "Could not force-remove or schedule folder for reboot deletion: $FolderPath" -Level ERROR
         return $false
     }
 }
@@ -666,6 +733,13 @@ function Remove-OldModuleVersions {
         $nonOneDriveModules = $allModules
     }
 
+    # Filter out built-in modules that ship with PowerShell (e.g. PackageManagement) —
+    # PSResourceGet cannot uninstall these and always errors
+    $psHomePath = $PSHOME
+    $nonOneDriveModules = $nonOneDriveModules | Where-Object {
+        -not ($_.InstalledLocation -like "$psHomePath*")
+    }
+
     $grouped = $nonOneDriveModules | Group-Object Name | Where-Object { $_.Count -gt 1 }
     Write-Log "Found $($grouped.Count) modules with multiple versions"
 
@@ -677,12 +751,25 @@ function Remove-OldModuleVersions {
                 Write-Log "Removing: $($oldVersion.Name) v$($oldVersion.Version)"
 
                 try {
-                    Uninstall-PSResource -Name $oldVersion.Name -Version $oldVersion.Version -SkipDependencyCheck -ErrorAction Stop
+                    $uninstallParams = @{
+                        Name                = $oldVersion.Name
+                        Version             = $oldVersion.Version
+                        SkipDependencyCheck = $true
+                        ErrorAction         = 'Stop'
+                    }
+                    if ($isOneDrive) { $uninstallParams['Scope'] = 'AllUsers' }
+                    Uninstall-PSResource @uninstallParams
                     $script:Summary.VersionsPruned++
                     Write-Log "Removed: $($oldVersion.Name) v$($oldVersion.Version)" -Level SUCCESS
                 }
                 catch {
                     $errorMsg = $_.Exception.Message
+
+                    # "does not exist" = built-in module or phantom metadata — skip silently
+                    if ($errorMsg -match 'does not exist') {
+                        Write-Log "Skipping $($oldVersion.Name) v$($oldVersion.Version): not managed by PSResourceGet" -Level WARN
+                        continue
+                    }
 
                     # If access denied / cannot delete, try force-removing the folder directly
                     $folderPath = $oldVersion.InstalledLocation
