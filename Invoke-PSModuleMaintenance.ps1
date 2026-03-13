@@ -21,11 +21,17 @@
 .PARAMETER PruneOnly
     Only prune old versions, skip updates.
 
+.PARAMETER MigrateOnly
+    Only migrate modules from OneDrive to AllUsers scope, skip updates and pruning.
+
 .PARAMETER WhatIf
     Show what would be done without making changes.
 
 .EXAMPLE
     .\Invoke-PSModuleMaintenance.ps1
+
+.EXAMPLE
+    .\Invoke-PSModuleMaintenance.ps1 -MigrateOnly
 
 .EXAMPLE
     .\Invoke-PSModuleMaintenance.ps1 -PruneOnly -WhatIf
@@ -47,7 +53,10 @@ param(
     [switch]$UpdateOnly,
 
     [Parameter()]
-    [switch]$PruneOnly
+    [switch]$PruneOnly,
+
+    [Parameter()]
+    [switch]$MigrateOnly
 )
 
 #Requires -Version 7.0
@@ -62,6 +71,7 @@ $script:Config = @{
     LogRetentionDays = 180
     TrustPSGallery = $true
     NotificationMode = 'Always'
+    MigrateFromOneDrive = $true
 }
 
 function Import-MaintenanceConfig {
@@ -88,6 +98,9 @@ function Import-MaintenanceConfig {
             if ($null -ne $jsonConfig.NotificationMode) {
                 $script:Config.NotificationMode = $jsonConfig.NotificationMode
             }
+            if ($null -ne $jsonConfig.MigrateFromOneDrive) {
+                $script:Config.MigrateFromOneDrive = $jsonConfig.MigrateFromOneDrive
+            }
 
             Write-Verbose "Loaded configuration from: $Path"
         }
@@ -112,6 +125,8 @@ $script:Summary = @{
     ModulesChecked = 0
     ModulesUpdated = 0
     ModulesFailed = @()
+    ModulesMigrated = 0
+    MigrationFailed = @()
     VersionsPruned = 0
     PrunesFailed = @()
     ExcludedModules = @()
@@ -220,6 +235,10 @@ function Send-ToastNotification {
         # Build the notification message from summary data
         $parts = @()
 
+        if ($Summary.ModulesMigrated -gt 0) {
+            $parts += "Migrated $($Summary.ModulesMigrated) modules from OneDrive"
+        }
+
         if (-not $SkippedUpdates) {
             $updateText = "Updated $($Summary.ModulesUpdated) modules"
             if ($Summary.ModulesFailed.Count -gt 0) {
@@ -294,11 +313,216 @@ catch {
 # MODULE OPERATIONS
 # ============================================================================
 
+function Test-OneDrivePath {
+    <#
+    .SYNOPSIS
+        Tests whether a given path is inside a OneDrive-synced folder.
+    #>
+    [CmdletBinding()]
+    param([string]$Path)
+
+    $oneDrivePaths = @($env:OneDrive, $env:OneDriveCommercial, $env:OneDriveConsumer) | Where-Object { $_ }
+    foreach ($odPath in $oneDrivePaths) {
+        if ($Path -like "$odPath*") { return $true }
+    }
+    return $false
+}
+
+function Move-ModulesToAllUsers {
+    <#
+    .SYNOPSIS
+        Copies modules from OneDrive-synced CurrentUser path to AllUsers scope.
+        Does not delete source copies — the prune pass handles that.
+    #>
+    [CmdletBinding(SupportsShouldProcess)]
+    param()
+
+    if (-not $script:Config.MigrateFromOneDrive) {
+        Write-Log "Module migration is disabled in configuration"
+        return
+    }
+
+    $currentUserModulePath = Join-Path ([Environment]::GetFolderPath('MyDocuments')) 'PowerShell\Modules'
+
+    if (-not (Test-OneDrivePath $currentUserModulePath)) {
+        Write-Log "CurrentUser module path is not in OneDrive — no migration needed"
+        return
+    }
+
+    if (-not (Test-Path $currentUserModulePath)) {
+        Write-Log "CurrentUser module path does not exist: $currentUserModulePath"
+        return
+    }
+
+    $allUsersPath = Join-Path $env:ProgramFiles 'PowerShell\Modules'
+    Write-Log "Migrating modules from OneDrive to AllUsers scope"
+    Write-Log "  Source: $currentUserModulePath"
+    Write-Log "  Destination: $allUsersPath"
+
+    $moduleFolders = Get-ChildItem -Path $currentUserModulePath -Directory -ErrorAction SilentlyContinue
+    if (-not $moduleFolders) {
+        Write-Log "No modules found in CurrentUser path"
+        return
+    }
+
+    foreach ($moduleFolder in $moduleFolders) {
+        $versionFolders = Get-ChildItem -Path $moduleFolder.FullName -Directory -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -match '^\d+(\.\d+){1,3}$' }
+
+        # Some modules don't use version subfolders — check for a manifest directly
+        if (-not $versionFolders) {
+            $manifest = Get-ChildItem -Path $moduleFolder.FullName -Filter '*.psd1' -ErrorAction SilentlyContinue | Select-Object -First 1
+            if (-not $manifest) { continue }
+
+            # Treat the module folder itself as the item to copy
+            $destPath = Join-Path $allUsersPath $moduleFolder.Name
+            if (Test-Path $destPath) {
+                Write-Verbose "Already exists in AllUsers (no version folder): $($moduleFolder.Name)"
+                continue
+            }
+
+            if ($PSCmdlet.ShouldProcess($moduleFolder.Name, "Copy module to AllUsers")) {
+                try {
+                    Copy-Item -Path $moduleFolder.FullName -Destination $destPath -Recurse -Force -ErrorAction Stop
+                    $script:Summary.ModulesMigrated++
+                    Write-Log "Migrated: $($moduleFolder.Name)" -Level SUCCESS
+                }
+                catch {
+                    Write-Log "Failed to migrate $($moduleFolder.Name): $_" -Level ERROR
+                    $script:Summary.MigrationFailed += @{
+                        Module = $moduleFolder.Name
+                        Error  = $_.Exception.Message
+                    }
+                }
+            }
+            continue
+        }
+
+        foreach ($versionFolder in $versionFolders) {
+            $destPath = Join-Path $allUsersPath "$($moduleFolder.Name)\$($versionFolder.Name)"
+
+            if (Test-Path $destPath) {
+                Write-Verbose "Already exists in AllUsers: $($moduleFolder.Name) v$($versionFolder.Name)"
+                continue
+            }
+
+            if ($PSCmdlet.ShouldProcess("$($moduleFolder.Name) v$($versionFolder.Name)", "Copy module to AllUsers")) {
+                try {
+                    $destParent = Join-Path $allUsersPath $moduleFolder.Name
+                    if (-not (Test-Path $destParent)) {
+                        New-Item -Path $destParent -ItemType Directory -Force | Out-Null
+                    }
+
+                    Copy-Item -Path $versionFolder.FullName -Destination $destPath -Recurse -Force -ErrorAction Stop
+                    $script:Summary.ModulesMigrated++
+                    Write-Log "Migrated: $($moduleFolder.Name) v$($versionFolder.Name)" -Level SUCCESS
+                }
+                catch {
+                    Write-Log "Failed to migrate $($moduleFolder.Name) v$($versionFolder.Name): $_" -Level ERROR
+                    $script:Summary.MigrationFailed += @{
+                        Module  = $moduleFolder.Name
+                        Version = $versionFolder.Name
+                        Error   = $_.Exception.Message
+                    }
+                }
+            }
+        }
+    }
+
+    Write-Log "Migration complete. Copied: $($script:Summary.ModulesMigrated), Failed: $($script:Summary.MigrationFailed.Count)"
+    if ($script:Summary.ModulesMigrated -gt 0) {
+        Write-Log "OneDrive copies will be cleaned up during the prune pass"
+    }
+}
+
+function Remove-LockedModuleFolder {
+    <#
+    .SYNOPSIS
+        Force-removes a module folder that OneDrive has locked by stripping file attributes first.
+        Only operates on folders that are inside a known PSModulePath and whose name is a valid version number.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$FolderPath
+    )
+
+    if (-not (Test-Path $FolderPath)) {
+        return $true
+    }
+
+    # Safety: folder name must look like a version number (e.g. 1.11.0)
+    $folderName = Split-Path $FolderPath -Leaf
+    if ($folderName -notmatch '^\d+(\.\d+){1,3}$') {
+        Write-Log "Refusing force-removal: '$folderName' is not a version folder" -Level ERROR
+        return $false
+    }
+
+    # Safety: path must be inside one of the known PSModulePath directories
+    $modulePaths = $env:PSModulePath -split [System.IO.Path]::PathSeparator
+    $isInsideModulePath = $false
+    foreach ($mp in $modulePaths) {
+        if ($mp -and $FolderPath -like "$mp*") {
+            $isInsideModulePath = $true
+            break
+        }
+    }
+    if (-not $isInsideModulePath) {
+        Write-Log "Refusing force-removal: path is not inside any PSModulePath directory" -Level ERROR
+        return $false
+    }
+
+    Write-Log "Force-removing locked folder: $FolderPath" -Level WARN
+
+    # Release any .NET assembly locks the current session may hold
+    [System.GC]::Collect()
+    [System.GC]::WaitForPendingFinalizers()
+
+    # Strip read-only, hidden, and system attributes from all files so they can be deleted
+    Get-ChildItem -Path $FolderPath -Recurse -Force -ErrorAction SilentlyContinue | ForEach-Object {
+        try {
+            [System.IO.File]::SetAttributes($_.FullName, [System.IO.FileAttributes]::Normal)
+        }
+        catch {
+            # Directories or already-deleted files — ignore
+        }
+    }
+
+    # First attempt: remove the whole tree at once
+    try {
+        Remove-Item -Path $FolderPath -Recurse -Force -ErrorAction Stop
+        Write-Log "Force-removed folder: $FolderPath" -Level SUCCESS
+        return $true
+    }
+    catch {
+        Write-Log "Bulk Remove-Item failed, trying file-by-file removal: $_" -Level WARN
+    }
+
+    # Second attempt: delete individual files first, then remove the empty directory tree
+    try {
+        Get-ChildItem -Path $FolderPath -Recurse -Force | Remove-Item -Force -Recurse -ErrorAction SilentlyContinue
+        Remove-Item -Path $FolderPath -Force -Recurse -ErrorAction Stop
+        Write-Log "Force-removed folder (file-by-file): $FolderPath" -Level SUCCESS
+        return $true
+    }
+    catch {
+        Write-Log "Could not force-remove folder: $FolderPath — $_" -Level ERROR
+        return $false
+    }
+}
+
 function Update-AllModules {
     [CmdletBinding(SupportsShouldProcess)]
     param()
 
     Write-Log "Starting module updates..."
+
+    # Detect OneDrive on module path — use AllUsers scope to avoid file locking
+    $currentUserModulePath = Join-Path ([Environment]::GetFolderPath('MyDocuments')) 'PowerShell\Modules'
+    $useAllUsersScope = Test-OneDrivePath $currentUserModulePath
+    if ($useAllUsersScope) {
+        Write-Log "OneDrive detected on module path — updates will target AllUsers scope"
+    }
 
     # Get installed modules (newest version of each)
     $installed = Get-PSResource |
@@ -361,6 +585,9 @@ function Update-AllModules {
                     TrustRepository = $script:Config.TrustPSGallery
                     ErrorAction     = 'Stop'
                 }
+                if ($useAllUsersScope) {
+                    $updateParams.Scope = 'AllUsers'
+                }
 
                 Update-PSResource @updateParams
                 $script:Summary.ModulesUpdated++
@@ -368,10 +595,45 @@ function Update-AllModules {
             }
         }
         catch {
-            Write-Log "Failed to update $($module.Name): $_" -Level ERROR
-            $script:Summary.ModulesFailed += @{
-                Module = $module.Name
-                Error  = $_.Exception.Message
+            $errorMsg = $_.Exception.Message
+
+            # Detect OneDrive-locked folders: "Cannot remove package path <path>"
+            # Loop because meta-packages like Az can hit multiple locked sub-module folders
+            $maxAttempts = 20
+            $attempt = 0
+            $updated = $false
+
+            while ($errorMsg -match 'Cannot remove package path\s+(.+?)\.?\s*(The previous|$)') {
+                $attempt++
+                if ($attempt -gt $maxAttempts) {
+                    Write-Log "Reached max force-removal attempts ($maxAttempts) for $($module.Name)" -Level ERROR
+                    break
+                }
+
+                $lockedPath = $Matches[1].TrimEnd('. ')
+                if (-not (Test-Path $lockedPath)) { break }
+
+                Write-Log "Locked folder detected ($attempt): $lockedPath — force-removing" -Level WARN
+                if (-not (Remove-LockedModuleFolder -FolderPath $lockedPath)) { break }
+
+                try {
+                    Update-PSResource @updateParams
+                    $script:Summary.ModulesUpdated++
+                    Write-Log "Updated (after $attempt force-removal(s)): $($module.Name)" -Level SUCCESS
+                    $updated = $true
+                    break
+                }
+                catch {
+                    $errorMsg = $_.Exception.Message
+                }
+            }
+
+            if (-not $updated) {
+                Write-Log "Failed to update $($module.Name): $errorMsg" -Level ERROR
+                $script:Summary.ModulesFailed += @{
+                    Module = $module.Name
+                    Error  = $errorMsg
+                }
             }
         }
     }
@@ -385,21 +647,22 @@ function Remove-OldModuleVersions {
 
     Write-Log "Starting old version cleanup..."
 
+    # Detect OneDrive on module path
+    $currentUserModulePath = Join-Path ([Environment]::GetFolderPath('MyDocuments')) 'PowerShell\Modules'
+    $isOneDrive = Test-OneDrivePath $currentUserModulePath
+
     $allModules = Get-PSResource | Where-Object { $_.Name -notin $script:Config.ExcludedModules }
 
-    # Check if modules are in OneDrive-synced folder
-    $oneDrivePaths = @($env:OneDrive, $env:OneDriveCommercial, $env:OneDriveConsumer) | Where-Object { $_ }
-    $sampleModule = $allModules | Select-Object -First 1
-    if ($sampleModule) {
-        $modulePath = Split-Path $sampleModule.InstalledLocation -Parent
-        $isOneDrive = $oneDrivePaths | Where-Object { $modulePath -like "$_*" }
-        if ($isOneDrive) {
-            Write-Log "Modules are in OneDrive-synced folder. Some deletions may require confirmation in OneDrive popup." -Level WARN
-        }
+    # --- Pass 1: Remove old versions of AllUsers modules (keep latest) ---
+    if ($isOneDrive) {
+        # Only prune modules NOT in OneDrive (AllUsers modules)
+        $nonOneDriveModules = $allModules | Where-Object { -not ($_.InstalledLocation -like "$currentUserModulePath*") }
+    }
+    else {
+        $nonOneDriveModules = $allModules
     }
 
-    $grouped = $allModules | Group-Object Name | Where-Object { $_.Count -gt 1 }
-
+    $grouped = $nonOneDriveModules | Group-Object Name | Where-Object { $_.Count -gt 1 }
     Write-Log "Found $($grouped.Count) modules with multiple versions"
 
     foreach ($group in $grouped) {
@@ -415,11 +678,68 @@ function Remove-OldModuleVersions {
                     Write-Log "Removed: $($oldVersion.Name) v$($oldVersion.Version)" -Level SUCCESS
                 }
                 catch {
-                    Write-Log "Failed to remove $($oldVersion.Name) v$($oldVersion.Version): $_" -Level ERROR
+                    $errorMsg = $_.Exception.Message
+
+                    # If access denied / cannot delete, try force-removing the folder directly
+                    $folderPath = $oldVersion.InstalledLocation
+                    if ($folderPath -and (Test-Path $folderPath) -and
+                        ($errorMsg -match 'Access.*denied|could not be deleted|Cannot remove')) {
+                        Write-Log "Lock detected — attempting force-removal of $folderPath" -Level WARN
+                        if (Remove-LockedModuleFolder -FolderPath $folderPath) {
+                            $script:Summary.VersionsPruned++
+                            Write-Log "Force-removed: $($oldVersion.Name) v$($oldVersion.Version)" -Level SUCCESS
+                            continue
+                        }
+                    }
+
+                    Write-Log "Failed to remove $($oldVersion.Name) v$($oldVersion.Version): $errorMsg" -Level ERROR
                     $script:Summary.PrunesFailed += @{
                         Module  = $oldVersion.Name
                         Version = $oldVersion.Version.ToString()
-                        Error   = $_.Exception.Message
+                        Error   = $errorMsg
+                    }
+                }
+            }
+        }
+    }
+
+    # --- Pass 2: Remove ALL migrated copies from OneDrive path ---
+    if ($isOneDrive) {
+        $oneDriveModules = $allModules | Where-Object { $_.InstalledLocation -like "$currentUserModulePath*" }
+
+        if ($oneDriveModules.Count -gt 0) {
+            Write-Log "Cleaning up $($oneDriveModules.Count) migrated module(s) from OneDrive path"
+
+            foreach ($odModule in $oneDriveModules) {
+                if ($PSCmdlet.ShouldProcess("$($odModule.Name) v$($odModule.Version) (OneDrive copy)", "Remove migrated copy")) {
+                    Write-Log "Removing OneDrive copy: $($odModule.Name) v$($odModule.Version)"
+
+                    try {
+                        Uninstall-PSResource -Name $odModule.Name -Version $odModule.Version -SkipDependencyCheck -ErrorAction Stop
+                        $script:Summary.VersionsPruned++
+                        Write-Log "Removed OneDrive copy: $($odModule.Name) v$($odModule.Version)" -Level SUCCESS
+                    }
+                    catch {
+                        $errorMsg = $_.Exception.Message
+                        $folderPath = $odModule.InstalledLocation
+
+                        if ($folderPath -and (Test-Path $folderPath) -and
+                            ($errorMsg -match 'Access.*denied|could not be deleted|Cannot remove')) {
+                            Write-Log "OneDrive lock on $($odModule.Name) — attempting force-removal" -Level WARN
+                            if (Remove-LockedModuleFolder -FolderPath $folderPath) {
+                                $script:Summary.VersionsPruned++
+                                Write-Log "Force-removed OneDrive copy: $($odModule.Name) v$($odModule.Version)" -Level SUCCESS
+                                continue
+                            }
+                        }
+
+                        # Log failure but don't stop — will retry next run
+                        Write-Log "Failed to remove OneDrive copy $($odModule.Name) v$($odModule.Version): $errorMsg" -Level WARN
+                        $script:Summary.PrunesFailed += @{
+                            Module  = $odModule.Name
+                            Version = $odModule.Version.ToString()
+                            Error   = $errorMsg
+                        }
                     }
                 }
             }
@@ -448,17 +768,24 @@ try {
     Write-Log "  - Log retention: $($script:Config.LogRetentionDays) days"
     Write-Log "  - Trust PSGallery: $($script:Config.TrustPSGallery)"
     Write-Log "  - Notification mode: $($script:Config.NotificationMode)"
+    Write-Log "  - Migrate from OneDrive: $($script:Config.MigrateFromOneDrive)"
 
     # Clean up old logs
     Remove-OldLogs -BasePath $LogPath -RetentionDays $script:Config.LogRetentionDays
 
     # Perform operations
-    if (-not $PruneOnly) {
-        Update-AllModules
+    if ($MigrateOnly) {
+        Move-ModulesToAllUsers
     }
+    else {
+        if (-not $PruneOnly) {
+            Move-ModulesToAllUsers
+            Update-AllModules
+        }
 
-    if (-not $UpdateOnly) {
-        Remove-OldModuleVersions
+        if (-not $UpdateOnly) {
+            Remove-OldModuleVersions
+        }
     }
 
     Write-Log "======================================================"
@@ -475,10 +802,10 @@ finally {
 
     # Send toast notification based on config
     $notifyMode = $script:Config.NotificationMode
-    $hasFailures = ($script:Summary.ModulesFailed.Count -gt 0) -or ($script:Summary.PrunesFailed.Count -gt 0)
+    $hasFailures = ($script:Summary.ModulesFailed.Count -gt 0) -or ($script:Summary.PrunesFailed.Count -gt 0) -or ($script:Summary.MigrationFailed.Count -gt 0)
 
     if ($notifyMode -eq 'Always' -or ($notifyMode -eq 'OnFailure' -and $hasFailures)) {
-        Send-ToastNotification -Summary $script:Summary -SkippedUpdates:$PruneOnly -SkippedPruning:$UpdateOnly
+        Send-ToastNotification -Summary $script:Summary -SkippedUpdates:($PruneOnly -or $MigrateOnly) -SkippedPruning:($UpdateOnly -or $MigrateOnly)
     }
 
     # Stop transcript

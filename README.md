@@ -6,11 +6,11 @@ Automated PowerShell module maintenance for Windows. Updates all PSResourceGet-m
 
 - 🔄 **Automatic Updates** — Updates all installed PowerShell modules via PSResourceGet
 - 🧹 **Version Pruning** — Removes old module versions, keeping only the latest
+- ☁️ **OneDrive Migration** — Automatically migrates modules out of OneDrive-synced folders to AllUsers scope
 - 📋 **Comprehensive Logging** — Structured logs with transcripts and JSON summaries
 - ⚙️ **Configurable Exclusions** — Skip specific modules via config file
 - ⏰ **Scheduled Execution** — Runs weekly via Windows Task Scheduler
 - 🔔 **Toast Notifications** — Optional Windows toast notifications after each run
-- 🔒 **CurrentUser Scope** — Runs as your account for OneDrive-synced module paths
 
 ## Requirements
 
@@ -38,7 +38,9 @@ Edit `config.json` to exclude specific modules:
     "SomeModuleIPinToSpecificVersion"
   ],
   "LogRetentionDays": 180,
-  "TrustPSGallery": true
+  "TrustPSGallery": true,
+  "NotificationMode": "Always",
+  "MigrateFromOneDrive": true
 }
 ```
 
@@ -63,7 +65,7 @@ This creates a weekly task running Sundays at 3:00 AM.
 Run the maintenance script directly:
 
 ```powershell
-# Full maintenance (update + prune)
+# Full maintenance (migrate + update + prune)
 .\Invoke-PSModuleMaintenance.ps1
 
 # Update only
@@ -71,6 +73,9 @@ Run the maintenance script directly:
 
 # Prune only
 .\Invoke-PSModuleMaintenance.ps1 -PruneOnly
+
+# Migrate modules out of OneDrive only (no updates or pruning)
+.\Invoke-PSModuleMaintenance.ps1 -MigrateOnly
 
 # Dry run - see what would happen
 .\Invoke-PSModuleMaintenance.ps1 -WhatIf
@@ -87,6 +92,7 @@ Run the maintenance script directly:
 | `LogRetentionDays` | int | `180` | Days to keep log files before auto-cleanup |
 | `TrustPSGallery` | bool | `true` | Trust PSGallery during updates (avoids prompts) |
 | `NotificationMode` | string | `"Always"` | Toast notifications: `"Always"`, `"OnFailure"`, or `"Never"` |
+| `MigrateFromOneDrive` | bool | `true` | Migrate modules from OneDrive to AllUsers scope (see below) |
 
 ## Notifications
 
@@ -118,6 +124,8 @@ C:\ProgramData\PSModuleMaintenance\Logs\
   "ModulesChecked": 79,
   "ModulesUpdated": 12,
   "ModulesFailed": [],
+  "ModulesMigrated": 0,
+  "MigrationFailed": [],
   "VersionsPruned": 45,
   "PrunesFailed": [],
   "ExcludedModules": ["Az.Accounts"]
@@ -138,15 +146,50 @@ Optionally remove logs:
 Remove-Item "$env:ProgramData\PSModuleMaintenance" -Recurse -Force
 ```
 
+## OneDrive Migration
+
+### The Problem
+
+PowerShell 7 installs CurrentUser-scope modules to `$HOME\Documents\PowerShell\Modules`. On enterprise devices with **Known Folder Move** enabled, the Documents folder is redirected to OneDrive. This causes OneDrive to sync module files, leading to:
+
+- **File locks** during sync that block `Update-PSResource` and `Uninstall-PSResource` with "Cannot remove package path" and "Access denied" errors
+- **Deletion confirmation popups** when pruning old module versions
+- **Inability to exclude the folder** from sync on managed devices (organizational policy)
+
+### The Solution
+
+When `MigrateFromOneDrive` is enabled (default), the script automatically:
+
+1. **Detects** if your CurrentUser module path is inside a OneDrive-synced folder
+2. **Copies** all modules to AllUsers scope (`$env:ProgramFiles\PowerShell\Modules`) — safely, without deleting the originals
+3. **Updates** modules with `-Scope AllUsers` so new versions install outside OneDrive
+4. **Cleans up** the old OneDrive copies during the prune pass, with force-removal fallback for locked files
+
+The migration is **idempotent and gradual** — modules that already exist at the destination are skipped, and OneDrive copies that can't be removed due to sync locks are retried on the next run.
+
+### Usage
+
+```powershell
+# Migrate only (good for first run or dry-run testing)
+.\Invoke-PSModuleMaintenance.ps1 -MigrateOnly -WhatIf
+.\Invoke-PSModuleMaintenance.ps1 -MigrateOnly
+
+# Full run includes migration automatically
+.\Invoke-PSModuleMaintenance.ps1
+```
+
+To disable migration, set `"MigrateFromOneDrive": false` in `config.json`. When disabled, or when the module path is not in OneDrive, the script behaves exactly as before.
+
 ## How It Works
 
 1. **Load Configuration** — Reads `config.json` for exclusions and settings
 2. **Initialize Logging** — Creates timestamped log files and starts transcript
 3. **Clean Old Logs** — Removes logs older than retention period
-4. **Update Modules** — Bulk checks PSGallery for available updates, then only updates modules that have newer versions
-5. **Prune Versions** — Groups modules by name, keeps newest, removes the rest (detects OneDrive and warns about potential popups)
-6. **Save Summary** — Writes JSON summary for monitoring/alerting integration
-7. **Toast Notification** — Shows a Windows toast with the run summary (if enabled via `NotificationMode`)
+4. **Migrate Modules** — If OneDrive is detected on the module path, copies modules to AllUsers scope
+5. **Update Modules** — Bulk checks PSGallery for available updates, then only updates modules that have newer versions (targets AllUsers scope when OneDrive is detected)
+6. **Prune Versions** — Groups modules by name, keeps newest, removes the rest. When OneDrive is detected, also removes all migrated copies from the OneDrive path
+7. **Save Summary** — Writes JSON summary for monitoring/alerting integration
+8. **Toast Notification** — Shows a Windows toast with the run summary (if enabled via `NotificationMode`)
 
 ## Troubleshooting
 
@@ -166,24 +209,21 @@ Check the log files for specific errors. Common causes:
 
 ### Permission errors
 
-Ensure the script runs as your user account (not SYSTEM) since modules are installed in CurrentUser scope.
+The script requires Administrator privileges when using OneDrive migration (AllUsers scope). The scheduled task is configured to run with highest privileges. For manual runs, use an elevated PowerShell prompt.
+
+### OneDrive file lock errors
+
+OneDrive can lock files during sync, causing "Cannot remove package path" or "Access denied" errors. The script handles this automatically:
+
+- **Force-removal** with .NET garbage collection, attribute stripping, and two-pass deletion (bulk then file-by-file)
+- **Retry loop** for meta-packages like Az that hit multiple locked sub-module folders
+- **Graceful failure** — locked files that can't be removed are logged and retried on the next run
+
+If you see persistent lock errors on the same module across multiple runs, the module's .dll may be loaded in the current PowerShell session. Close all PowerShell windows and let the scheduled task handle it, or run from a fresh session.
 
 ### OneDrive "large number of files deleted" warning
 
-OneDrive may warn about mass deletions when pruning old module versions. This is expected behavior. To prevent this warning, exclude your PowerShell modules folder from OneDrive sync:
-
-1. Open OneDrive Settings → Account → Choose folders
-2. Deselect `Documents\PowerShell\Modules` (PowerShell 7+) or `Documents\WindowsPowerShell\Modules` (Windows PowerShell)
-
-**Note:** On managed devices with Known Folder Move enabled, you may not be able to deselect subfolders of Documents. This is an organizational policy limitation — contact your IT admin or accept the OneDrive warnings when they appear.
-
-### "Access denied" errors during pruning
-
-OneDrive can lock files during sync, causing "Access denied" errors when removing old module versions. The script detects OneDrive-synced folders and warns you upfront. When this happens, OneDrive may show a confirmation popup — click "Delete" to allow the removal. Solutions:
-
-1. **Confirm in OneDrive popup** — When prompted, click "Delete" to allow the removal
-2. **Pause OneDrive sync** before running maintenance (right-click OneDrive tray icon → Pause syncing)
-3. **Exclude the Modules folder** from OneDrive sync (see above) — this is the permanent fix
+OneDrive may warn about mass deletions when cleaning up migrated module copies. This is expected — the modules have already been copied to AllUsers scope. Click "Delete" to allow OneDrive to sync the removal.
 
 ## Contributing
 

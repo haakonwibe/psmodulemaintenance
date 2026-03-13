@@ -10,5 +10,7 @@
   
   "TrustPSGallery": true,
 
-  "NotificationMode": "Always"
+  "NotificationMode": "Always",
+
+  "MigrateFromOneDrive": true
 }

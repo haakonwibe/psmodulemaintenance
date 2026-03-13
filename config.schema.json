@@ -40,6 +40,11 @@
       "description": "When to show Windows toast notifications: Always, OnFailure, or Never",
       "enum": ["Always", "OnFailure", "Never"],
       "default": "Always"
+    },
+    "MigrateFromOneDrive": {
+      "type": "boolean",
+      "description": "Automatically migrate modules from OneDrive-synced CurrentUser path to AllUsers scope when Documents is redirected to OneDrive via Known Folder Move",
+      "default": true
     }
   },
   "additionalProperties": false
