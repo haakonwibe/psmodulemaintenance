@@ -157,6 +157,18 @@ PowerShell 7 installs CurrentUser-scope modules to `$HOME\Documents\PowerShell\M
 - **Deletion confirmation popups** when pruning old module versions
 - **Inability to exclude the folder** from sync on managed devices (organizational policy)
 
+### The Four Horsemen
+
+Solving this required fighting four systems at once, each with undocumented edge cases that only revealed themselves when the previous layer was fixed:
+
+1. **PSResourceGet's scope model** — `Get-PSResource` without `-Scope` defaults to CurrentUser only (finds nothing after migration). `Uninstall-PSResource` without `-Scope` targets *any* scope (deletes the wrong copies). `InstalledLocation` returns inconsistent paths. Each API call needed different scope handling.
+
+2. **OneDrive Known Folder Move** — Silently redirects a system path that PowerShell depends on. No API to detect it directly — you have to infer it by comparing `[Environment]::GetFolderPath('MyDocuments')` against OneDrive environment variables.
+
+3. **OneDrive cloud placeholders** — Files that *look* normal to `Get-ChildItem` but are actually NTFS reparse points with no local data. They return "Access denied" on delete, but `handle.exe` shows no locks and ACLs show FullControl. The fix: strip cloud attributes with `attrib -P -U -O`, then use `cmd.exe rd /s /q` which handles reparse points where PowerShell's `Remove-Item` cannot.
+
+4. **The cascading reveal** — Each fix exposed the next bug. Fix the migration → scope mismatch deletes AllUsers modules. Fix the scope → `Get-PSResource` returns 1 module instead of 160. Fix that → `InstalledLocation` points to wrong path. Fix *that* → "Access denied" on cloud placeholders. No single system was "wrong" — the bugs only existed at the intersections.
+
 ### The Solution
 
 When `MigrateFromOneDrive` is enabled, the script automatically:
@@ -171,15 +183,17 @@ The migration is **idempotent and gradual** — modules that already exist at th
 ### Usage
 
 ```powershell
-# Migrate only (good for first run or dry-run testing)
-.\Invoke-PSModuleMaintenance.ps1 -MigrateOnly -WhatIf
-.\Invoke-PSModuleMaintenance.ps1 -MigrateOnly
+# Dry-run first to see what would happen
+.\Invoke-PSModuleMaintenance.ps1 -MigrateFromOneDrive -WhatIf
 
-# Full run includes migration automatically
-.\Invoke-PSModuleMaintenance.ps1
+# One-time migration + full maintenance (no config change needed)
+.\Invoke-PSModuleMaintenance.ps1 -MigrateFromOneDrive
+
+# Migrate only, skip updates and pruning
+.\Invoke-PSModuleMaintenance.ps1 -MigrateOnly -MigrateFromOneDrive
 ```
 
-To enable migration, set `"MigrateFromOneDrive": true` in `config.json`. When disabled (the default), or when the module path is not in OneDrive, the script behaves exactly as before.
+To enable migration permanently, set `"MigrateFromOneDrive": true` in `config.json`. The `-MigrateFromOneDrive` switch overrides the config for a single run. When disabled (the default), or when the module path is not in OneDrive, the script behaves exactly as before.
 
 ## How It Works
 

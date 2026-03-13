@@ -24,6 +24,9 @@
 .PARAMETER MigrateOnly
     Only migrate modules from OneDrive to AllUsers scope, skip updates and pruning.
 
+.PARAMETER MigrateFromOneDrive
+    Enable OneDrive migration for this run, overriding the config.json setting.
+
 .PARAMETER WhatIf
     Show what would be done without making changes.
 
@@ -56,7 +59,10 @@ param(
     [switch]$PruneOnly,
 
     [Parameter()]
-    [switch]$MigrateOnly
+    [switch]$MigrateOnly,
+
+    [Parameter()]
+    [switch]$MigrateFromOneDrive
 )
 
 #Requires -Version 7.0
@@ -859,6 +865,11 @@ try {
 
     # Load configuration
     Import-MaintenanceConfig -Path $ConfigPath
+
+    # -MigrateFromOneDrive switch overrides config file
+    if ($MigrateFromOneDrive) {
+        $script:Config.MigrateFromOneDrive = $true
+    }
 
     # Initialize logging
     Initialize-Logging -BasePath $LogPath
