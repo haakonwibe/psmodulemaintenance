@@ -68,6 +68,9 @@ param(
 #Requires -Version 7.0
 #Requires -Modules Microsoft.PowerShell.PSResourceGet
 
+# Suppress progress bars — they add significant overhead in non-interactive/scheduled task mode
+$ProgressPreference = 'SilentlyContinue'
+
 # ============================================================================
 # CONFIGURATION
 # ============================================================================
@@ -78,6 +81,7 @@ $script:Config = @{
     TrustPSGallery = $true
     NotificationMode = 'Always'
     MigrateFromOneDrive = $false
+    ModuleUpdateTimeoutSeconds = 600
 }
 
 function Import-MaintenanceConfig {
@@ -106,6 +110,9 @@ function Import-MaintenanceConfig {
             }
             if ($null -ne $jsonConfig.MigrateFromOneDrive) {
                 $script:Config.MigrateFromOneDrive = $jsonConfig.MigrateFromOneDrive
+            }
+            if ($null -ne $jsonConfig.ModuleUpdateTimeoutSeconds) {
+                $script:Config.ModuleUpdateTimeoutSeconds = $jsonConfig.ModuleUpdateTimeoutSeconds
             }
 
             Write-Verbose "Loaded configuration from: $Path"
@@ -195,11 +202,15 @@ function Save-Summary {
     param([string]$BasePath)
 
     $script:Summary.EndTime = Get-Date -Format 'o'
-    
-    $summaryFile = Join-Path $BasePath "summary_$(Get-Date -Format 'yyyy-MM-dd_HHmmss').json"
-    $script:Summary | ConvertTo-Json -Depth 3 | Set-Content -Path $summaryFile
 
-    Write-Log "Summary saved to: $summaryFile"
+    # Reuse the same file path so incremental saves overwrite rather than create duplicates
+    if (-not $script:SummaryFile) {
+        $script:SummaryFile = Join-Path $BasePath "summary_$(Get-Date -Format 'yyyy-MM-dd_HHmmss').json"
+    }
+
+    $script:Summary | ConvertTo-Json -Depth 3 | Set-Content -Path $script:SummaryFile
+
+    Write-Log "Summary saved to: $script:SummaryFile"
 }
 
 function Remove-OldLogs {
@@ -584,6 +595,57 @@ namespace PSModuleMaintenance {
     }
 }
 
+function Invoke-ModuleUpdate {
+    <#
+    .SYNOPSIS
+        Runs Update-PSResource in an isolated runspace with a timeout.
+        Prevents a single slow/hung module from consuming all scheduled task time.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$Name,
+
+        [string]$Scope,
+
+        [bool]$TrustRepository = $true,
+
+        [int]$TimeoutSeconds = 600
+    )
+
+    $ps = [powershell]::Create()
+    try {
+        $ps.AddScript({
+            param($n, $s, $t)
+            $params = @{
+                Name            = $n
+                AcceptLicense   = $true
+                TrustRepository = $t
+                ErrorAction     = 'Stop'
+            }
+            if ($s) { $params['Scope'] = $s }
+            Update-PSResource @params
+        }).AddArgument($Name).AddArgument($Scope).AddArgument($TrustRepository) | Out-Null
+
+        $handle = $ps.BeginInvoke()
+
+        if (-not $handle.AsyncWaitHandle.WaitOne([TimeSpan]::FromSeconds($TimeoutSeconds))) {
+            $ps.Stop()
+            throw [System.TimeoutException]::new(
+                "Update timed out after $TimeoutSeconds seconds for module '$Name'")
+        }
+
+        $ps.EndInvoke($handle) | Out-Null
+
+        if ($ps.HadErrors) {
+            throw $ps.Streams.Error[0].Exception
+        }
+    }
+    finally {
+        $ps.Dispose()
+    }
+}
+
 function Update-AllModules {
     [CmdletBinding(SupportsShouldProcess)]
     param()
@@ -648,25 +710,32 @@ function Update-AllModules {
 
     Write-Log "Found $($needsUpdate.Count) modules with available updates"
 
+    $scope = if ($useAllUsersScope) { 'AllUsers' } else { $null }
+    $timeout = $script:Config.ModuleUpdateTimeoutSeconds
+
     # Update only modules that need it
+    $moduleIndex = 0
     foreach ($module in $needsUpdate) {
+        $moduleIndex++
+
         try {
             if ($PSCmdlet.ShouldProcess("$($module.Name) $($module.InstalledVersion) -> $($module.GalleryVersion)", "Update module")) {
-                Write-Log "Updating: $($module.Name) ($($module.InstalledVersion) -> $($module.GalleryVersion))"
+                Write-Log "Updating module $moduleIndex/$($needsUpdate.Count): $($module.Name) ($($module.InstalledVersion) -> $($module.GalleryVersion))"
 
-                $updateParams = @{
-                    Name            = $module.Name
-                    AcceptLicense   = $true
-                    TrustRepository = $script:Config.TrustPSGallery
-                    ErrorAction     = 'Stop'
-                }
-                if ($useAllUsersScope) {
-                    $updateParams.Scope = 'AllUsers'
-                }
+                $moduleTimer = [System.Diagnostics.Stopwatch]::StartNew()
 
-                Update-PSResource @updateParams
+                Invoke-ModuleUpdate -Name $module.Name -Scope $scope `
+                    -TrustRepository $script:Config.TrustPSGallery -TimeoutSeconds $timeout
+
                 $script:Summary.ModulesUpdated++
-                Write-Log "Updated: $($module.Name)" -Level SUCCESS
+                Write-Log "Updated: $($module.Name) (took $([math]::Round($moduleTimer.Elapsed.TotalSeconds))s)" -Level SUCCESS
+            }
+        }
+        catch [System.TimeoutException] {
+            Write-Log "Timed out updating $($module.Name) after ${timeout}s — skipping" -Level ERROR
+            $script:Summary.ModulesFailed += @{
+                Module = $module.Name
+                Error  = $_.Exception.Message
             }
         }
         catch {
@@ -692,10 +761,20 @@ function Update-AllModules {
                 if (-not (Remove-LockedModuleFolder -FolderPath $lockedPath)) { break }
 
                 try {
-                    Update-PSResource @updateParams
+                    Invoke-ModuleUpdate -Name $module.Name -Scope $scope `
+                        -TrustRepository $script:Config.TrustPSGallery -TimeoutSeconds $timeout
                     $script:Summary.ModulesUpdated++
-                    Write-Log "Updated (after $attempt force-removal(s)): $($module.Name)" -Level SUCCESS
+                    Write-Log "Updated (after $attempt force-removal(s)): $($module.Name) (took $([math]::Round($moduleTimer.Elapsed.TotalSeconds))s)" -Level SUCCESS
                     $updated = $true
+                    break
+                }
+                catch [System.TimeoutException] {
+                    Write-Log "Timed out updating $($module.Name) after ${timeout}s — skipping" -Level ERROR
+                    $script:Summary.ModulesFailed += @{
+                        Module = $module.Name
+                        Error  = $_.Exception.Message
+                    }
+                    $updated = $true  # Prevent double-logging below
                     break
                 }
                 catch {
@@ -881,22 +960,27 @@ try {
     Write-Log "  - Trust PSGallery: $($script:Config.TrustPSGallery)"
     Write-Log "  - Notification mode: $($script:Config.NotificationMode)"
     Write-Log "  - Migrate from OneDrive: $($script:Config.MigrateFromOneDrive)"
+    Write-Log "  - Module update timeout: $($script:Config.ModuleUpdateTimeoutSeconds)s"
 
     # Clean up old logs
     Remove-OldLogs -BasePath $LogPath -RetentionDays $script:Config.LogRetentionDays
 
-    # Perform operations
+    # Perform operations — save summary after each phase so state is preserved if the process is killed
     if ($MigrateOnly) {
         Move-ModulesToAllUsers
+        Save-Summary -BasePath $LogPath
     }
     else {
         if (-not $PruneOnly) {
             Move-ModulesToAllUsers
+            Save-Summary -BasePath $LogPath
             Update-AllModules
+            Save-Summary -BasePath $LogPath
         }
 
         if (-not $UpdateOnly) {
             Remove-OldModuleVersions
+            Save-Summary -BasePath $LogPath
         }
     }
 

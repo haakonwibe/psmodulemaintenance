@@ -11,6 +11,7 @@ Automated PowerShell module maintenance for Windows. Updates all PSResourceGet-m
 - ⚙️ **Configurable Exclusions** — Skip specific modules via config file
 - ⏰ **Scheduled Execution** — Runs weekly via Windows Task Scheduler
 - 🔔 **Toast Notifications** — Optional Windows toast notifications after each run
+- 🛡️ **Per-Module Timeout** — Each module update runs in an isolated runspace with a configurable timeout, preventing one slow module from blocking the entire run
 
 ## Requirements
 
@@ -40,7 +41,8 @@ Edit `config.json` to exclude specific modules:
   "LogRetentionDays": 180,
   "TrustPSGallery": true,
   "NotificationMode": "Always",
-  "MigrateFromOneDrive": false
+  "MigrateFromOneDrive": false,
+  "ModuleUpdateTimeoutSeconds": 600
 }
 ```
 
@@ -96,6 +98,7 @@ Run the maintenance script directly:
 | `TrustPSGallery` | bool | `true` | Trust PSGallery during updates (avoids prompts) |
 | `NotificationMode` | string | `"Always"` | Toast notifications: `"Always"`, `"OnFailure"`, or `"Never"` |
 | `MigrateFromOneDrive` | bool | `false` | Migrate modules from OneDrive to AllUsers scope (see below) |
+| `ModuleUpdateTimeoutSeconds` | int | `600` | Max seconds per module update before timing out and moving to the next |
 
 ## Notifications
 
@@ -204,9 +207,9 @@ To enable migration permanently, set `"MigrateFromOneDrive": true` in `config.js
 2. **Initialize Logging** — Creates timestamped log files and starts transcript
 3. **Clean Old Logs** — Removes logs older than retention period
 4. **Migrate Modules** — If OneDrive is detected on the module path, copies modules to AllUsers scope
-5. **Update Modules** — Bulk checks PSGallery for available updates, then only updates modules that have newer versions (targets AllUsers scope when OneDrive is detected)
+5. **Update Modules** — Bulk checks PSGallery for available updates, then updates each module in an isolated runspace with a per-module timeout (targets AllUsers scope when OneDrive is detected)
 6. **Prune Versions** — Groups modules by name, keeps newest, removes the rest (skips built-in modules like PackageManagement). When OneDrive is detected, also removes all migrated copies from the OneDrive path
-7. **Save Summary** — Writes JSON summary for monitoring/alerting integration
+7. **Save Summary** — Writes JSON summary after each phase (incremental saves protect against process termination)
 8. **Toast Notification** — Shows a Windows toast with the run summary (if enabled via `NotificationMode`)
 
 ## Troubleshooting
@@ -224,6 +227,18 @@ Check the log files for specific errors. Common causes:
 - Module removed from PSGallery
 - Dependency conflicts
 - Network/proxy issues
+
+### Module update timed out
+
+Large meta-modules like `Microsoft.Graph` (40+ sub-modules) can exceed the default 10-minute timeout. Increase it in `config.json`:
+
+```json
+{
+  "ModuleUpdateTimeoutSeconds": 1200
+}
+```
+
+The log will show which module timed out and how far through the update list it got (e.g. "Updating module 1/40: Microsoft.Graph").
 
 ### Permission errors
 

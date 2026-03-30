@@ -44,8 +44,8 @@ PSModuleMaintenance is a Windows-based automation tool that keeps PowerShell mod
 2. Logging - Initializes log files, transcript, and summary tracking
 3. Toast Notifications - `Send-ToastNotification` function (shells out to PS 5.1 for WinRT support)
 4. OneDrive Migration - `Test-OneDrivePath`, `Move-ModulesToAllUsers`, `Remove-LockedModuleFolder` functions
-5. Module Operations - `Update-AllModules` and `Remove-OldModuleVersions` functions
-6. Main Execution - Orchestrates the workflow with try/finally for cleanup
+5. Module Operations - `Invoke-ModuleUpdate`, `Update-AllModules`, and `Remove-OldModuleVersions` functions
+6. Main Execution - Orchestrates the workflow with try/finally for cleanup and incremental summary saves
 
 **Install-ModuleMaintenance.ps1** - Creates Windows Scheduled Task that runs the maintenance script weekly as the current user with elevated privileges.
 
@@ -55,9 +55,13 @@ PSModuleMaintenance is a Windows-based automation tool that keeps PowerShell mod
 - `TrustPSGallery`: Trust repository during updates (default true)
 - `NotificationMode`: Toast notifications — `Always` (default), `OnFailure`, or `Never`
 - `MigrateFromOneDrive`: Migrate modules from OneDrive to AllUsers scope (default false)
+- `ModuleUpdateTimeoutSeconds`: Per-module update timeout in seconds (default 600)
 
 ## Key Implementation Details
 
+- **Per-module timeout**: Each `Update-PSResource` call runs in an isolated PowerShell runspace via `Invoke-ModuleUpdate`. If a module exceeds `ModuleUpdateTimeoutSeconds` (default 600s), the runspace is stopped and the script moves to the next module — prevents one slow/hung module (e.g. Microsoft.Graph) from consuming all scheduled task time
+- **Incremental summary saves**: `Save-Summary` is called after each phase (migration, updates, pruning), overwriting the same file. If the process is killed mid-run, the last completed phase's results are on disk
+- **Progress suppression**: `$ProgressPreference = 'SilentlyContinue'` is set at script start — progress bars add significant overhead in non-interactive/scheduled task mode
 - **Update optimization**: Bulk queries PSGallery via `Find-PSResource` to check for available updates, then only calls `Update-PSResource` for modules that actually need updating (avoids 150+ individual network calls)
 - **PSResourceGet scope pitfalls**: `Get-PSResource` without `-Scope` defaults to CurrentUser only — after OneDrive migration, modules live in AllUsers so `-Scope AllUsers` is required. `Uninstall-PSResource` without `-Scope` can target ANY scope, potentially removing AllUsers copies instead of OneDrive copies — the OneDrive cleanup pass uses direct folder deletion (`Remove-Item` / `Remove-LockedModuleFolder`) instead
 - **OneDrive migration**: When Documents is redirected to OneDrive via Known Folder Move, the script detects this by checking `[Environment]::GetFolderPath('MyDocuments')` against OneDrive environment variables, then:
@@ -74,5 +78,5 @@ PSModuleMaintenance is a Windows-based automation tool that keeps PowerShell mod
   - When OneDrive is NOT detected, all behavior is identical to pre-migration versions
 - Modules are grouped by name; only the latest version is kept during pruning
 - Logs go to `$env:ProgramData\PSModuleMaintenance\Logs` with three file types: structured log, full transcript, and JSON summary
-- The scheduled task uses `Interactive` logon type with "run with highest privileges" (runs hidden, requires user to be logged in but `StartWhenAvailable` catches up if missed)
+- The scheduled task uses `Interactive` logon type with "run with highest privileges" (runs hidden, requires user to be logged in but `StartWhenAvailable` catches up if missed) with a 4-hour execution time limit
 - Both scripts use `[CmdletBinding(SupportsShouldProcess)]` for `-WhatIf` support

@@ -126,7 +126,7 @@ function Install-MaintenanceTask {
         -DontStopIfGoingOnBatteries `
         -StartWhenAvailable `
         -RunOnlyIfNetworkAvailable `
-        -ExecutionTimeLimit (New-TimeSpan -Hours 2)
+        -ExecutionTimeLimit (New-TimeSpan -Hours 4)
 
     # Register the task
     $taskParams = @{

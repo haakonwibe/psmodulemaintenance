@@ -45,6 +45,13 @@
       "type": "boolean",
       "description": "Automatically migrate modules from OneDrive-synced CurrentUser path to AllUsers scope when Documents is redirected to OneDrive via Known Folder Move",
       "default": false
+    },
+    "ModuleUpdateTimeoutSeconds": {
+      "type": "integer",
+      "description": "Maximum seconds to wait for a single module update before timing out and moving to the next module. Prevents one slow module (e.g. Microsoft.Graph) from consuming all scheduled task time.",
+      "minimum": 60,
+      "maximum": 3600,
+      "default": 600
     }
   },
   "additionalProperties": false
