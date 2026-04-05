@@ -21,20 +21,11 @@
 .PARAMETER PruneOnly
     Only prune old versions, skip updates.
 
-.PARAMETER MigrateOnly
-    Only migrate modules from OneDrive to AllUsers scope, skip updates and pruning.
-
-.PARAMETER MigrateFromOneDrive
-    Enable OneDrive migration for this run, overriding the config.json setting.
-
 .PARAMETER WhatIf
     Show what would be done without making changes.
 
 .EXAMPLE
     .\Invoke-PSModuleMaintenance.ps1
-
-.EXAMPLE
-    .\Invoke-PSModuleMaintenance.ps1 -MigrateOnly
 
 .EXAMPLE
     .\Invoke-PSModuleMaintenance.ps1 -PruneOnly -WhatIf
@@ -56,13 +47,7 @@ param(
     [switch]$UpdateOnly,
 
     [Parameter()]
-    [switch]$PruneOnly,
-
-    [Parameter()]
-    [switch]$MigrateOnly,
-
-    [Parameter()]
-    [switch]$MigrateFromOneDrive
+    [switch]$PruneOnly
 )
 
 #Requires -Version 7.0
@@ -80,7 +65,6 @@ $script:Config = @{
     LogRetentionDays = 180
     TrustPSGallery = $true
     NotificationMode = 'Always'
-    MigrateFromOneDrive = $false
     ModuleUpdateTimeoutSeconds = 600
 }
 
@@ -107,9 +91,6 @@ function Import-MaintenanceConfig {
             }
             if ($null -ne $jsonConfig.NotificationMode) {
                 $script:Config.NotificationMode = $jsonConfig.NotificationMode
-            }
-            if ($null -ne $jsonConfig.MigrateFromOneDrive) {
-                $script:Config.MigrateFromOneDrive = $jsonConfig.MigrateFromOneDrive
             }
             if ($null -ne $jsonConfig.ModuleUpdateTimeoutSeconds) {
                 $script:Config.ModuleUpdateTimeoutSeconds = $jsonConfig.ModuleUpdateTimeoutSeconds
@@ -138,8 +119,6 @@ $script:Summary = @{
     ModulesChecked = 0
     ModulesUpdated = 0
     ModulesFailed = @()
-    ModulesMigrated = 0
-    MigrationFailed = @()
     VersionsPruned = 0
     PrunesFailed = @()
     ExcludedModules = @()
@@ -252,10 +231,6 @@ function Send-ToastNotification {
         # Build the notification message from summary data
         $parts = @()
 
-        if ($Summary.ModulesMigrated -gt 0) {
-            $parts += "Migrated $($Summary.ModulesMigrated) modules from OneDrive"
-        }
-
         if (-not $SkippedUpdates) {
             $updateText = "Updated $($Summary.ModulesUpdated) modules"
             if ($Summary.ModulesFailed.Count -gt 0) {
@@ -343,113 +318,6 @@ function Test-OneDrivePath {
         if ($Path -like "$odPath*") { return $true }
     }
     return $false
-}
-
-function Move-ModulesToAllUsers {
-    <#
-    .SYNOPSIS
-        Copies modules from OneDrive-synced CurrentUser path to AllUsers scope.
-        Does not delete source copies — the prune pass handles that.
-    #>
-    [CmdletBinding(SupportsShouldProcess)]
-    param()
-
-    if (-not $script:Config.MigrateFromOneDrive) {
-        Write-Log "Module migration is disabled in configuration"
-        return
-    }
-
-    $currentUserModulePath = Join-Path ([Environment]::GetFolderPath('MyDocuments')) 'PowerShell\Modules'
-
-    if (-not (Test-OneDrivePath $currentUserModulePath)) {
-        Write-Log "CurrentUser module path is not in OneDrive — no migration needed"
-        return
-    }
-
-    if (-not (Test-Path $currentUserModulePath)) {
-        Write-Log "CurrentUser module path does not exist: $currentUserModulePath"
-        return
-    }
-
-    $allUsersPath = Join-Path $env:ProgramFiles 'PowerShell\Modules'
-    Write-Log "Migrating modules from OneDrive to AllUsers scope"
-    Write-Log "  Source: $currentUserModulePath"
-    Write-Log "  Destination: $allUsersPath"
-
-    $moduleFolders = Get-ChildItem -Path $currentUserModulePath -Directory -ErrorAction SilentlyContinue
-    if (-not $moduleFolders) {
-        Write-Log "No modules found in CurrentUser path"
-        return
-    }
-
-    foreach ($moduleFolder in $moduleFolders) {
-        $versionFolders = Get-ChildItem -Path $moduleFolder.FullName -Directory -ErrorAction SilentlyContinue |
-            Where-Object { $_.Name -match '^\d+(\.\d+){1,3}$' }
-
-        # Some modules don't use version subfolders — check for a manifest directly
-        if (-not $versionFolders) {
-            $manifest = Get-ChildItem -Path $moduleFolder.FullName -Filter '*.psd1' -ErrorAction SilentlyContinue | Select-Object -First 1
-            if (-not $manifest) { continue }
-
-            # Treat the module folder itself as the item to copy
-            $destPath = Join-Path $allUsersPath $moduleFolder.Name
-            if (Test-Path $destPath) {
-                Write-Verbose "Already exists in AllUsers (no version folder): $($moduleFolder.Name)"
-                continue
-            }
-
-            if ($PSCmdlet.ShouldProcess($moduleFolder.Name, "Copy module to AllUsers")) {
-                try {
-                    Copy-Item -Path $moduleFolder.FullName -Destination $destPath -Recurse -Force -ErrorAction Stop
-                    $script:Summary.ModulesMigrated++
-                    Write-Log "Migrated: $($moduleFolder.Name)" -Level SUCCESS
-                }
-                catch {
-                    Write-Log "Failed to migrate $($moduleFolder.Name): $_" -Level ERROR
-                    $script:Summary.MigrationFailed += @{
-                        Module = $moduleFolder.Name
-                        Error  = $_.Exception.Message
-                    }
-                }
-            }
-            continue
-        }
-
-        foreach ($versionFolder in $versionFolders) {
-            $destPath = Join-Path $allUsersPath "$($moduleFolder.Name)\$($versionFolder.Name)"
-
-            if (Test-Path $destPath) {
-                Write-Verbose "Already exists in AllUsers: $($moduleFolder.Name) v$($versionFolder.Name)"
-                continue
-            }
-
-            if ($PSCmdlet.ShouldProcess("$($moduleFolder.Name) v$($versionFolder.Name)", "Copy module to AllUsers")) {
-                try {
-                    $destParent = Join-Path $allUsersPath $moduleFolder.Name
-                    if (-not (Test-Path $destParent)) {
-                        New-Item -Path $destParent -ItemType Directory -Force | Out-Null
-                    }
-
-                    Copy-Item -Path $versionFolder.FullName -Destination $destPath -Recurse -Force -ErrorAction Stop
-                    $script:Summary.ModulesMigrated++
-                    Write-Log "Migrated: $($moduleFolder.Name) v$($versionFolder.Name)" -Level SUCCESS
-                }
-                catch {
-                    Write-Log "Failed to migrate $($moduleFolder.Name) v$($versionFolder.Name): $_" -Level ERROR
-                    $script:Summary.MigrationFailed += @{
-                        Module  = $moduleFolder.Name
-                        Version = $versionFolder.Name
-                        Error   = $_.Exception.Message
-                    }
-                }
-            }
-        }
-    }
-
-    Write-Log "Migration complete. Copied: $($script:Summary.ModulesMigrated), Failed: $($script:Summary.MigrationFailed.Count)"
-    if ($script:Summary.ModulesMigrated -gt 0) {
-        Write-Log "OneDrive copies will be cleaned up during the prune pass"
-    }
 }
 
 function Remove-LockedModuleFolder {
@@ -964,11 +832,6 @@ try {
     # Load configuration
     Import-MaintenanceConfig -Path $ConfigPath
 
-    # -MigrateFromOneDrive switch overrides config file
-    if ($MigrateFromOneDrive) {
-        $script:Config.MigrateFromOneDrive = $true
-    }
-
     # Initialize logging
     Initialize-Logging -BasePath $LogPath
 
@@ -978,29 +841,20 @@ try {
     Write-Log "  - Log retention: $($script:Config.LogRetentionDays) days"
     Write-Log "  - Trust PSGallery: $($script:Config.TrustPSGallery)"
     Write-Log "  - Notification mode: $($script:Config.NotificationMode)"
-    Write-Log "  - Migrate from OneDrive: $($script:Config.MigrateFromOneDrive)"
     Write-Log "  - Module update timeout: $($script:Config.ModuleUpdateTimeoutSeconds)s"
 
     # Clean up old logs
     Remove-OldLogs -BasePath $LogPath -RetentionDays $script:Config.LogRetentionDays
 
     # Perform operations — save summary after each phase so state is preserved if the process is killed
-    if ($MigrateOnly) {
-        Move-ModulesToAllUsers
+    if (-not $PruneOnly) {
+        Update-AllModules
         Save-Summary -BasePath $LogPath
     }
-    else {
-        if (-not $PruneOnly) {
-            Move-ModulesToAllUsers
-            Save-Summary -BasePath $LogPath
-            Update-AllModules
-            Save-Summary -BasePath $LogPath
-        }
 
-        if (-not $UpdateOnly) {
-            Remove-OldModuleVersions
-            Save-Summary -BasePath $LogPath
-        }
+    if (-not $UpdateOnly) {
+        Remove-OldModuleVersions
+        Save-Summary -BasePath $LogPath
     }
 
     Write-Log "======================================================"
@@ -1017,10 +871,10 @@ finally {
 
     # Send toast notification based on config
     $notifyMode = $script:Config.NotificationMode
-    $hasFailures = ($script:Summary.ModulesFailed.Count -gt 0) -or ($script:Summary.PrunesFailed.Count -gt 0) -or ($script:Summary.MigrationFailed.Count -gt 0)
+    $hasFailures = ($script:Summary.ModulesFailed.Count -gt 0) -or ($script:Summary.PrunesFailed.Count -gt 0)
 
     if ($notifyMode -eq 'Always' -or ($notifyMode -eq 'OnFailure' -and $hasFailures)) {
-        Send-ToastNotification -Summary $script:Summary -SkippedUpdates:($PruneOnly -or $MigrateOnly) -SkippedPruning:($UpdateOnly -or $MigrateOnly)
+        Send-ToastNotification -Summary $script:Summary -SkippedUpdates:$PruneOnly -SkippedPruning:$UpdateOnly
     }
 
     # Stop transcript

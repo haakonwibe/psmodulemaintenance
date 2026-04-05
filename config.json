@@ -12,7 +12,5 @@
 
   "NotificationMode": "Always",
 
-  "MigrateFromOneDrive": false,
-
   "ModuleUpdateTimeoutSeconds": 600
 }

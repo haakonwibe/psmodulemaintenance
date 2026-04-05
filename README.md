@@ -6,7 +6,7 @@ Automated PowerShell module maintenance for Windows. Updates all PSResourceGet-m
 
 - 🔄 **Automatic Updates** — Updates all installed PowerShell modules via PSResourceGet
 - 🧹 **Version Pruning** — Removes old module versions, keeping only the latest
-- ☁️ **OneDrive Migration** — Automatically migrates modules out of OneDrive-synced folders to AllUsers scope
+- ☁️ **OneDrive Migration** — Standalone script to migrate modules out of OneDrive-synced folders to AllUsers scope
 - 📋 **Comprehensive Logging** — Structured logs with transcripts and JSON summaries
 - ⚙️ **Configurable Exclusions** — Skip specific modules via config file
 - ⏰ **Scheduled Execution** — Runs weekly via Windows Task Scheduler
@@ -41,7 +41,6 @@ Edit `config.json` to exclude specific modules:
   "LogRetentionDays": 180,
   "TrustPSGallery": true,
   "NotificationMode": "Always",
-  "MigrateFromOneDrive": false,
   "ModuleUpdateTimeoutSeconds": 600
 }
 ```
@@ -70,23 +69,20 @@ Run the maintenance script directly:
 # Full maintenance (update + prune)
 .\Invoke-PSModuleMaintenance.ps1
 
-# Full maintenance with OneDrive migration
-.\Invoke-PSModuleMaintenance.ps1 -MigrateFromOneDrive
-
 # Update only
 .\Invoke-PSModuleMaintenance.ps1 -UpdateOnly
 
 # Prune only
 .\Invoke-PSModuleMaintenance.ps1 -PruneOnly
 
-# Migrate modules out of OneDrive only (no updates or pruning)
-.\Invoke-PSModuleMaintenance.ps1 -MigrateOnly -MigrateFromOneDrive
-
 # Dry run - see what would happen
 .\Invoke-PSModuleMaintenance.ps1 -WhatIf
 
 # Verbose output
 .\Invoke-PSModuleMaintenance.ps1 -Verbose
+
+# Migrate modules out of OneDrive (one-time, see OneDrive Migration section below)
+.\Invoke-OneDriveMigration.ps1
 ```
 
 ## Configuration
@@ -97,7 +93,6 @@ Run the maintenance script directly:
 | `LogRetentionDays` | int | `180` | Days to keep log files before auto-cleanup |
 | `TrustPSGallery` | bool | `true` | Trust PSGallery during updates (avoids prompts) |
 | `NotificationMode` | string | `"Always"` | Toast notifications: `"Always"`, `"OnFailure"`, or `"Never"` |
-| `MigrateFromOneDrive` | bool | `false` | Migrate modules from OneDrive to AllUsers scope (see below) |
 | `ModuleUpdateTimeoutSeconds` | int | `600` | Max seconds per module update before timing out and moving to the next |
 
 ## Notifications
@@ -130,8 +125,6 @@ C:\ProgramData\PSModuleMaintenance\Logs\
   "ModulesChecked": 79,
   "ModulesUpdated": 12,
   "ModulesFailed": [],
-  "ModulesMigrated": 0,
-  "MigrationFailed": [],
   "VersionsPruned": 45,
   "PrunesFailed": [],
   "ExcludedModules": ["Az.Accounts"]
@@ -177,12 +170,13 @@ Solving this required fighting four systems at once, each with undocumented edge
 
 ### The Solution
 
-When `MigrateFromOneDrive` is enabled, the script automatically:
+`Invoke-OneDriveMigration.ps1` is a standalone one-time migration script that:
 
 1. **Detects** if your CurrentUser module path is inside a OneDrive-synced folder
 2. **Copies** all modules to AllUsers scope (`$env:ProgramFiles\PowerShell\Modules`) — safely, without deleting the originals
-3. **Updates** modules with `-Scope AllUsers` so new versions install outside OneDrive
-4. **Cleans up** the old OneDrive copies during the prune pass, with four-stage force-removal for cloud placeholders and locked files (see [Troubleshooting](#onedrive-file-lock--cloud-placeholder-errors))
+3. **Cleans up** the old OneDrive copies with four-stage force-removal for cloud placeholders and locked files (see [Troubleshooting](#onedrive-file-lock--cloud-placeholder-errors))
+
+After migration, the weekly maintenance script (`Invoke-PSModuleMaintenance.ps1`) automatically detects OneDrive on the module path and targets AllUsers scope for all future updates and pruning — no configuration needed.
 
 The migration is **idempotent and gradual** — modules that already exist at the destination are skipped, and OneDrive copies that can't be removed are either force-deleted or scheduled for reboot deletion.
 
@@ -190,27 +184,24 @@ The migration is **idempotent and gradual** — modules that already exist at th
 
 ```powershell
 # Dry-run first to see what would happen
-.\Invoke-PSModuleMaintenance.ps1 -MigrateFromOneDrive -WhatIf
+.\Invoke-OneDriveMigration.ps1 -WhatIf
 
-# One-time migration + full maintenance (no config change needed)
-.\Invoke-PSModuleMaintenance.ps1 -MigrateFromOneDrive
+# Run the migration (requires Administrator)
+.\Invoke-OneDriveMigration.ps1
 
-# Migrate only, skip updates and pruning
-.\Invoke-PSModuleMaintenance.ps1 -MigrateOnly -MigrateFromOneDrive
+# Copy modules to AllUsers but keep OneDrive copies in place
+.\Invoke-OneDriveMigration.ps1 -SkipCleanup
 ```
-
-To enable migration permanently, set `"MigrateFromOneDrive": true` in `config.json`. The `-MigrateFromOneDrive` switch overrides the config for a single run. When disabled (the default), or when the module path is not in OneDrive, the script behaves exactly as before.
 
 ## How It Works
 
 1. **Load Configuration** — Reads `config.json` for exclusions and settings
 2. **Initialize Logging** — Creates timestamped log files and starts transcript
 3. **Clean Old Logs** — Removes logs older than retention period
-4. **Migrate Modules** — If OneDrive is detected on the module path, copies modules to AllUsers scope
-5. **Update Modules** — Bulk checks PSGallery for available updates, then updates each module in an isolated runspace with a per-module timeout (targets AllUsers scope when OneDrive is detected)
-6. **Prune Versions** — Groups modules by name, keeps newest, removes the rest (skips built-in modules like PackageManagement). When OneDrive is detected, also removes all migrated copies from the OneDrive path
-7. **Save Summary** — Writes JSON summary after each phase (incremental saves protect against process termination)
-8. **Toast Notification** — Shows a Windows toast with the run summary (if enabled via `NotificationMode`)
+4. **Update Modules** — Bulk checks PSGallery for available updates, then updates each module in an isolated runspace with a per-module timeout (targets AllUsers scope when OneDrive is detected)
+5. **Prune Versions** — Groups modules by name, keeps newest, removes the rest (skips built-in modules like PackageManagement). When OneDrive is detected, also removes all migrated copies from the OneDrive path
+6. **Save Summary** — Writes JSON summary after each phase (incremental saves protect against process termination)
+7. **Toast Notification** — Shows a Windows toast with the run summary (if enabled via `NotificationMode`)
 
 ## Troubleshooting
 
@@ -242,7 +233,7 @@ The log will show which module timed out and how far through the update list it 
 
 ### Permission errors
 
-The script requires Administrator privileges when using OneDrive migration (AllUsers scope). The scheduled task is configured to run with highest privileges. For manual runs, use an elevated PowerShell prompt.
+The maintenance script requires Administrator privileges when modules are in AllUsers scope (after OneDrive migration). The scheduled task is configured to run with highest privileges. For manual runs, use an elevated PowerShell prompt. `Invoke-OneDriveMigration.ps1` requires Administrator (enforced via `#Requires -RunAsAdministrator`).
 
 ### OneDrive file lock / cloud placeholder errors
 
