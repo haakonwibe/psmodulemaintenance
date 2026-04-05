@@ -858,6 +858,25 @@ function Remove-OldModuleVersions {
 
                     # If access denied / cannot delete, try force-removing the folder directly
                     $folderPath = $oldVersion.InstalledLocation
+                    # PSResourceGet sometimes returns the modules root or module base instead
+                    # of the version folder — detect and correct this
+                    $versionString = $oldVersion.Version.ToString()
+                    if ($folderPath -and -not $folderPath.EndsWith($versionString)) {
+                        # Try to extract the correct path from the error message
+                        if ($errorMsg -match "Parent directory '([^']+)'") {
+                            $folderPath = $Matches[1]
+                        }
+                        else {
+                            # Construct it: InstalledLocation may be the modules root or module base
+                            $leaf = Split-Path $folderPath -Leaf
+                            if ($leaf -eq $oldVersion.Name) {
+                                $folderPath = Join-Path $folderPath $versionString
+                            }
+                            else {
+                                $folderPath = Join-Path $folderPath $oldVersion.Name $versionString
+                            }
+                        }
+                    }
                     if ($folderPath -and (Test-Path $folderPath) -and
                         ($errorMsg -match 'Access.*denied|could not be deleted|Cannot remove')) {
                         Write-Log "Lock detected — attempting force-removal of $folderPath" -Level WARN
