@@ -199,7 +199,7 @@ The migration is **idempotent and gradual** — modules that already exist at th
 2. **Initialize Logging** — Creates timestamped log files and starts transcript
 3. **Clean Old Logs** — Removes logs older than retention period
 4. **Update Modules** — Bulk checks PSGallery for available updates, then updates each module in an isolated runspace with a per-module timeout (targets AllUsers scope when OneDrive is detected)
-5. **Prune Versions** — Groups modules by name, keeps newest, removes the rest (skips built-in modules like PackageManagement). When OneDrive is detected, also removes all migrated copies from the OneDrive path
+5. **Prune Versions** — Groups modules by name, keeps newest, removes the rest (skips built-in modules like PackageManagement). When OneDrive is detected and modules are found in the CurrentUser path, logs a warning to run `Invoke-OneDriveMigration.ps1`
 6. **Save Summary** — Writes JSON summary after each phase (incremental saves protect against process termination)
 7. **Toast Notification** — Shows a Windows toast with the run summary (if enabled via `NotificationMode`)
 

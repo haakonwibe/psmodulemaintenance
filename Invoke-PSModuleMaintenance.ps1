@@ -766,56 +766,20 @@ function Remove-OldModuleVersions {
         }
     }
 
-    # --- Pass 2: Remove ALL migrated copies from OneDrive path ---
-    # Uses direct folder deletion instead of Uninstall-PSResource to avoid
-    # accidentally removing AllUsers copies (Uninstall-PSResource without -Scope
-    # can target any scope where the module is found).
+    # --- Warn about modules in OneDrive path ---
+    # After migration, modules should live in AllUsers only. If new modules appear
+    # in the OneDrive CurrentUser path, warn the user instead of silently deleting them.
     if ($isOneDrive -and (Test-Path $currentUserModulePath)) {
-        $odModuleFolders = Get-ChildItem -Path $currentUserModulePath -Directory -ErrorAction SilentlyContinue
+        $odModuleFolders = Get-ChildItem -Path $currentUserModulePath -Directory -ErrorAction SilentlyContinue |
+            Where-Object {
+                # Only count folders that contain version subfolders (real modules)
+                Get-ChildItem -Path $_.FullName -Directory -ErrorAction SilentlyContinue |
+                    Where-Object { $_.Name -match '^\d+(\.\d+){1,3}$' }
+            }
 
         if ($odModuleFolders.Count -gt 0) {
-            Write-Log "Cleaning up $($odModuleFolders.Count) module folder(s) from OneDrive path"
-
-            foreach ($moduleFolder in $odModuleFolders) {
-                $versionFolders = Get-ChildItem -Path $moduleFolder.FullName -Directory -ErrorAction SilentlyContinue |
-                    Where-Object { $_.Name -match '^\d+(\.\d+){1,3}$' }
-
-                foreach ($versionFolder in $versionFolders) {
-                    $moduleName = $moduleFolder.Name
-                    $versionName = $versionFolder.Name
-
-                    if ($PSCmdlet.ShouldProcess("$moduleName v$versionName (OneDrive copy)", "Remove migrated copy")) {
-                        Write-Log "Removing OneDrive copy: $moduleName v$versionName"
-
-                        try {
-                            Remove-Item -Path $versionFolder.FullName -Recurse -Force -ErrorAction Stop
-                            $script:Summary.VersionsPruned++
-                            Write-Log "Removed OneDrive copy: $moduleName v$versionName" -Level SUCCESS
-                        }
-                        catch {
-                            Write-Log "OneDrive lock on $moduleName — attempting force-removal" -Level WARN
-                            if (Remove-LockedModuleFolder -FolderPath $versionFolder.FullName) {
-                                $script:Summary.VersionsPruned++
-                                Write-Log "Force-removed OneDrive copy: $moduleName v$versionName" -Level SUCCESS
-                            }
-                            else {
-                                Write-Log "Failed to remove OneDrive copy $moduleName v${versionName}: $($_.Exception.Message)" -Level WARN
-                                $script:Summary.PrunesFailed += @{
-                                    Module  = $moduleName
-                                    Version = $versionName
-                                    Error   = $_.Exception.Message
-                                }
-                            }
-                        }
-                    }
-                }
-
-                # Clean up empty module folder after all versions removed
-                if ((Test-Path $moduleFolder.FullName) -and
-                    @(Get-ChildItem -Path $moduleFolder.FullName -Force -ErrorAction SilentlyContinue).Count -eq 0) {
-                    Remove-Item -Path $moduleFolder.FullName -Force -ErrorAction SilentlyContinue
-                }
-            }
+            $moduleNames = ($odModuleFolders | Select-Object -ExpandProperty Name) -join ', '
+            Write-Log "Found $($odModuleFolders.Count) module(s) in OneDrive path: $moduleNames — run Invoke-OneDriveMigration.ps1 to migrate them" -Level WARN
         }
     }
 
