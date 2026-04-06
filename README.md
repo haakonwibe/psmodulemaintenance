@@ -45,7 +45,21 @@ Edit `config.json` to exclude specific modules:
 }
 ```
 
-### 3. Install Scheduled Task
+### 3. OneDrive Check
+
+If your device uses **OneDrive Known Folder Move** (common on enterprise/Intune-managed devices), your PowerShell modules are synced to OneDrive, which causes file locks and sync conflicts. Run the migration script first to move them out:
+
+```powershell
+# Check if you're affected (dry run)
+.\Invoke-OneDriveMigration.ps1 -WhatIf
+
+# If it finds modules, run the migration (requires Administrator)
+.\Invoke-OneDriveMigration.ps1
+```
+
+If OneDrive is not detected, the script exits immediately. See [OneDrive Migration](#onedrive-migration) for details.
+
+### 4. Install Scheduled Task
 
 Run as Administrator:
 
@@ -156,6 +170,8 @@ PowerShell 7 installs CurrentUser-scope modules to `$HOME\Documents\PowerShell\M
 - **Deletion confirmation popups** when pruning old module versions
 - **Inability to exclude the folder** from sync on managed devices (organizational policy)
 
+**How do I know if this affects me?** Run `.\Invoke-OneDriveMigration.ps1 -WhatIf` — if it says "CurrentUser module path is not in OneDrive", you're not affected and can ignore this section entirely. If it lists modules to copy, you're affected. This is common on enterprise devices managed by Intune/SCCM with Known Folder Move policies.
+
 ### The Four Horsemen
 
 Solving this required fighting four systems at once, each with undocumented edge cases that only revealed themselves when the previous layer was fixed:
@@ -179,6 +195,8 @@ Solving this required fighting four systems at once, each with undocumented edge
 After migration, the weekly maintenance script (`Invoke-PSModuleMaintenance.ps1`) automatically detects OneDrive on the module path and targets AllUsers scope for all future updates and pruning — no configuration needed.
 
 The migration is **idempotent and gradual** — modules that already exist at the destination are skipped, and OneDrive copies that can't be removed are either force-deleted or scheduled for reboot deletion.
+
+If you skip migration, the weekly maintenance script will still work (it detects OneDrive and targets AllUsers scope automatically), but any modules left in the OneDrive path will trigger a warning in the logs: `Found N module(s) in OneDrive path — run Invoke-OneDriveMigration.ps1 to migrate them`.
 
 ### Usage
 
