@@ -33,7 +33,7 @@ The toast uses the `ToastGeneric` template:
   <visual>
     <binding template="ToastGeneric">
       <text>PSModuleMaintenance</text>
-      <text>Updated 148 modules. Pruned 53 versions. No errors.</text>
+      <text>Updated 148 modules. Pruned 53 versions. No issues.</text>
     </binding>
   </visual>
 </toast>
@@ -41,13 +41,13 @@ The toast uses the `ToastGeneric` template:
 
 **Message logic:**
 - Always shows modules updated and versions pruned counts
-- Appends failure counts only when there are failures
+- Appends failure counts only when there are failures (labeled `unsuccessful`, not `failed`, so the logged copy isn't flagged red in CMTrace)
 - If run was `UpdateOnly` or `PruneOnly`, only mentions the relevant operation
 
 Examples:
-- Clean run: `Updated 148 modules. Pruned 53 versions. No errors.`
-- With failures: `Updated 148 modules, 4 failed. Pruned 53 versions, 47 failed.`
-- Update only: `Updated 148 modules. No errors.`
+- Clean run: `Updated 148 modules. Pruned 53 versions. No issues.`
+- With failures: `Updated 148 modules, 4 unsuccessful. Pruned 53 versions, 47 unsuccessful.`
+- Update only: `Updated 148 modules. No issues.`
 
 ## Implementation
 

@@ -77,7 +77,7 @@ function Write-Log {
     }
 
     if ($script:LogFile) {
-        $entry | Out-File -FilePath $script:LogFile -Append -Encoding utf8
+        $entry | Out-File -FilePath $script:LogFile -Append -Encoding utf8 -WhatIf:$false
     }
 }
 
@@ -351,7 +351,7 @@ foreach ($moduleFolder in $moduleFolders) {
     }
 }
 
-Write-Log "Copy phase complete. Copied: $copiedCount, Failed: $($copyFailures.Count)"
+Write-Log "Copy phase complete. Copied: $copiedCount, Unsuccessful: $($copyFailures.Count)"
 
 # --- Phase 2: Clean up OneDrive copies ---
 if ($SkipCleanup) {
@@ -421,7 +421,7 @@ if (-not $SkipCleanup) {
             }
         }
 
-        Write-Log "Cleanup complete. Removed: $removedCount, Failed: $($removeFailures.Count)"
+        Write-Log "Cleanup complete. Removed: $removedCount, Unsuccessful: $($removeFailures.Count)"
     }
 }
 

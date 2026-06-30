@@ -164,7 +164,7 @@ function Write-Log {
 
     # Write to log file
     if ($script:LogFile) {
-        Add-Content -Path $script:LogFile -Value $logEntry
+        Add-Content -Path $script:LogFile -Value $logEntry -WhatIf:$false
     }
 
     # Write to console with colors
@@ -187,7 +187,7 @@ function Save-Summary {
         $script:SummaryFile = Join-Path $BasePath "summary_$(Get-Date -Format 'yyyy-MM-dd_HHmmss').json"
     }
 
-    $script:Summary | ConvertTo-Json -Depth 3 | Set-Content -Path $script:SummaryFile
+    $script:Summary | ConvertTo-Json -Depth 3 | Set-Content -Path $script:SummaryFile -WhatIf:$false
 
     Write-Log "Summary saved to: $script:SummaryFile"
 }
@@ -234,7 +234,7 @@ function Send-ToastNotification {
         if (-not $SkippedUpdates) {
             $updateText = "Updated $($Summary.ModulesUpdated) modules"
             if ($Summary.ModulesFailed.Count -gt 0) {
-                $updateText += ", $($Summary.ModulesFailed.Count) failed"
+                $updateText += ", $($Summary.ModulesFailed.Count) unsuccessful"
             }
             $parts += $updateText
         }
@@ -242,7 +242,7 @@ function Send-ToastNotification {
         if (-not $SkippedPruning) {
             $pruneText = "Pruned $($Summary.VersionsPruned) versions"
             if ($Summary.PrunesFailed.Count -gt 0) {
-                $pruneText += ", $($Summary.PrunesFailed.Count) failed"
+                $pruneText += ", $($Summary.PrunesFailed.Count) unsuccessful"
             }
             $parts += $pruneText
         }
@@ -251,7 +251,7 @@ function Send-ToastNotification {
 
         $message = ($parts -join '. ') + '.'
         if (-not $hasFailures) {
-            $message += ' No errors.'
+            $message += ' No issues.'
         }
 
         # Use Windows PowerShell (5.1) for native WinRT toast support — always present on Windows 10/11
@@ -660,7 +660,7 @@ function Update-AllModules {
         }
     }
 
-    Write-Log "Module updates complete. Updated: $($script:Summary.ModulesUpdated), Failed: $($script:Summary.ModulesFailed.Count)"
+    Write-Log "Module updates complete. Updated: $($script:Summary.ModulesUpdated), Unsuccessful: $($script:Summary.ModulesFailed.Count)"
 }
 
 function Remove-OldModuleVersions {
@@ -783,7 +783,7 @@ function Remove-OldModuleVersions {
         }
     }
 
-    Write-Log "Version cleanup complete. Removed: $($script:Summary.VersionsPruned), Failed: $($script:Summary.PrunesFailed.Count)"
+    Write-Log "Version cleanup complete. Removed: $($script:Summary.VersionsPruned), Unsuccessful: $($script:Summary.PrunesFailed.Count)"
 }
 
 # ============================================================================
