@@ -9,6 +9,7 @@ Automated PowerShell module maintenance for Windows. Updates all PSResourceGet-m
 - ☁️ **OneDrive Migration** — Standalone script to migrate modules out of OneDrive-synced folders to AllUsers scope
 - 📋 **Comprehensive Logging** — Structured logs with transcripts and JSON summaries
 - ⚙️ **Configurable Exclusions** — Skip specific modules via config file
+- 📌 **Version Pinning** — Hold specific modules at a chosen version instead of updating them
 - ⏰ **Scheduled Execution** — Runs weekly via Windows Task Scheduler
 - 🔔 **Toast Notifications** — Optional Windows toast notifications after each run
 - 🛡️ **Per-Module Timeout** — Each module update runs in an isolated runspace with a configurable timeout, preventing one slow module from blocking the entire run
@@ -30,14 +31,16 @@ cd PSModuleMaintenance
 
 ### 2. Configure (Optional)
 
-Edit `config.json` to exclude specific modules:
+Edit `config.json` to exclude or pin specific modules:
 
 ```json
 {
   "ExcludedModules": [
-    "Az.Accounts",
-    "SomeModuleIPinToSpecificVersion"
+    "SomeModuleIManageMyself"
   ],
+  "PinnedModules": {
+    "Az.Accounts": "2.19.0"
+  },
   "LogRetentionDays": 180,
   "TrustPSGallery": true,
   "NotificationMode": "Always",
@@ -104,10 +107,52 @@ Run the maintenance script directly:
 | Setting | Type | Default | Description |
 |---------|------|---------|-------------|
 | `ExcludedModules` | string[] | `[]` | Module names to skip during updates and pruning |
+| `PinnedModules` | object | `{}` | Module name → exact version to hold (see [Version Pinning](#version-pinning)) |
 | `LogRetentionDays` | int | `180` | Days to keep log files before auto-cleanup |
 | `TrustPSGallery` | bool | `true` | Trust PSGallery during updates (avoids prompts) |
 | `NotificationMode` | string | `"Always"` | Toast notifications: `"Always"`, `"OnFailure"`, or `"Never"` |
 | `ModuleUpdateTimeoutSeconds` | int | `600` | Max seconds per module update before timing out and moving to the next |
+
+## Version Pinning
+
+Pinning holds a module at one specific version. Use it when a newer release breaks something and you need that module to stay put while everything else keeps updating.
+
+```json
+{
+  "PinnedModules": {
+    "Az.Accounts": "2.19.0",
+    "Pester": "5.7.1"
+  }
+}
+```
+
+For each pinned module the script:
+
+1. **Skips the normal update** — the module is never updated to the latest gallery version
+2. **Installs the pinned version if it's missing** — including downgrading, since PSResourceGet installs versions side-by-side
+3. **Reports what the pin is holding back** — pinned modules stay in the gallery lookup (same single bulk call either way), so the log tells you which release you're declining
+4. **Prunes everything else** — unlike unpinned modules where the newest version is kept, pruning keeps the *pinned* version and removes all others, newer ones included
+
+A run with `"PSWriteColor": "1.0.2"` pinned while 1.0.3 is installed logs:
+
+```
+[INFO] Enforcing 1 pinned module version(s)...
+[INFO] Installing pinned version of PSWriteColor: 1.0.2 (installed: 1.0.3.0)
+[SUCCESS] Installed pinned version: PSWriteColor 1.0.2 (took 3s)
+[INFO] PSWriteColor is pinned to 1.0.2 — holding back 1.0.3
+...
+[INFO] Removing: PSWriteColor v1.0.3
+[SUCCESS] Removed: PSWriteColor v1.0.3
+```
+
+### Rules and edge cases
+
+- **The version must be exact.** `"2.19.0"` and `"2.19"` are the same pin (versions are padded to four parts, so `2.19` = `2.19.0.0`). Ranges and wildcards are not supported — `"2.*"` or `"latest"` is logged as a warning and the pin is ignored.
+- **Prerelease pins work**: `"6.0.0-beta1"`. The label must match exactly.
+- **Pinning never installs a module you don't already have.** A pin for a module that isn't installed logs a note and does nothing.
+- **If the pinned version can't be installed** (wrong version number, gallery unreachable), pruning leaves *all* installed versions of that module in place rather than deleting the ones you have. You'll see a `WARN` in the log and a `PinsFailed` entry in the summary.
+- **`ExcludedModules` wins over a pin.** Listing a module in both is contradictory — exclusion means "never touch this", so the pin is dropped with a warning. Use exclusion when you want a module left entirely alone, including its old versions; use a pin when you want one specific version kept and the rest cleaned up.
+- Pins are enforced during the update phase, so `-PruneOnly` skips enforcement but still prunes pin-aware.
 
 ## Notifications
 
@@ -141,9 +186,18 @@ C:\ProgramData\PSModuleMaintenance\Logs\
   "ModulesFailed": [],
   "VersionsPruned": 45,
   "PrunesFailed": [],
-  "ExcludedModules": ["Az.Accounts"]
+  "ExcludedModules": ["Az.Accounts"],
+  "PinnedModules": { "Pester": "5.7.1" },
+  "PinsSatisfied": 1,
+  "PinsEnforced": 0,
+  "PinsFailed": [],
+  "PinsHoldingBack": [
+    { "Module": "Pester", "Pinned": "5.7.1", "Available": "6.0.1" }
+  ]
 }
 ```
+
+`PinsSatisfied` counts modules already on their pinned version, `PinsEnforced` counts pins this run had to install, and `PinsHoldingBack` lists the newer releases each pin is declining — useful for periodically reviewing whether a pin is still needed.
 
 ## Uninstall
 

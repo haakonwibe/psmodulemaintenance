@@ -249,9 +249,10 @@ namespace PSModuleMaintenance {
 
 $ErrorActionPreference = 'Stop'
 
-# Initialize log file
+# Initialize log file. -WhatIf:$false matches Write-Log's own write — without the
+# directory, a dry run against a new log path silently produces no log at all.
 if (-not (Test-Path $LogPath)) {
-    New-Item -Path $LogPath -ItemType Directory -Force | Out-Null
+    New-Item -Path $LogPath -ItemType Directory -Force -WhatIf:$false | Out-Null
 }
 $timestamp = Get-Date -Format 'yyyy-MM-dd_HHmmss'
 $script:LogFile = Join-Path $LogPath "migration_$timestamp.log"

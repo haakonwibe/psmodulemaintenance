@@ -62,10 +62,36 @@ $ProgressPreference = 'SilentlyContinue'
 
 $script:Config = @{
     ExcludedModules = @()
+    PinnedModules = @{}
     LogRetentionDays = 180
     TrustPSGallery = $true
     NotificationMode = 'Always'
     ModuleUpdateTimeoutSeconds = 600
+}
+
+# Config is loaded before logging starts, so problems found there are queued and
+# written to the log once Initialize-Logging has run
+$script:ConfigWarnings = @()
+
+function ConvertTo-PinnedModuleTable {
+    <#
+    .SYNOPSIS
+        Converts the PinnedModules JSON object into a hashtable of parsed pin objects.
+        Entries with an unparseable version are dropped with a warning.
+    #>
+    [CmdletBinding()]
+    param($PinnedConfig)
+
+    $table = @{}
+    foreach ($entry in $PinnedConfig.PSObject.Properties) {
+        $parsed = ConvertFrom-PinnedVersionString $entry.Value
+        if (-not $parsed) {
+            $script:ConfigWarnings += "Ignoring pin for '$($entry.Name)': '$($entry.Value)' is not a valid version"
+            continue
+        }
+        $table[$entry.Name] = $parsed
+    }
+    return $table
 }
 
 function Import-MaintenanceConfig {
@@ -83,6 +109,9 @@ function Import-MaintenanceConfig {
             if ($jsonConfig.ExcludedModules) {
                 $script:Config.ExcludedModules = @($jsonConfig.ExcludedModules)
             }
+            if ($jsonConfig.PinnedModules) {
+                $script:Config.PinnedModules = ConvertTo-PinnedModuleTable $jsonConfig.PinnedModules
+            }
             if ($null -ne $jsonConfig.LogRetentionDays) {
                 $script:Config.LogRetentionDays = $jsonConfig.LogRetentionDays
             }
@@ -94,6 +123,15 @@ function Import-MaintenanceConfig {
             }
             if ($null -ne $jsonConfig.ModuleUpdateTimeoutSeconds) {
                 $script:Config.ModuleUpdateTimeoutSeconds = $jsonConfig.ModuleUpdateTimeoutSeconds
+            }
+
+            # A module that is both excluded and pinned is contradictory — exclusion means
+            # "never touch it", so it wins and the pin is dropped
+            foreach ($name in @($script:Config.PinnedModules.Keys)) {
+                if ($name -in $script:Config.ExcludedModules) {
+                    $script:ConfigWarnings += "'$name' is both excluded and pinned — exclusion takes precedence, the pin is ignored"
+                    $script:Config.PinnedModules.Remove($name)
+                }
             }
 
             Write-Verbose "Loaded configuration from: $Path"
@@ -122,15 +160,22 @@ $script:Summary = @{
     VersionsPruned = 0
     PrunesFailed = @()
     ExcludedModules = @()
+    PinnedModules = @{}
+    PinsSatisfied = 0
+    PinsEnforced = 0
+    PinsFailed = @()
+    PinsHoldingBack = @()
 }
 
 function Initialize-Logging {
     [CmdletBinding()]
     param([string]$BasePath)
 
-    # Ensure log directory exists
+    # Ensure log directory exists. -WhatIf:$false for the same reason as the writes in
+    # Write-Log and Save-Summary: without the directory, a dry run against a log path that
+    # doesn't exist yet silently produces no log file and no summary.
     if (-not (Test-Path $BasePath)) {
-        New-Item -Path $BasePath -ItemType Directory -Force | Out-Null
+        New-Item -Path $BasePath -ItemType Directory -Force -WhatIf:$false | Out-Null
     }
 
     $timestamp = Get-Date -Format 'yyyy-MM-dd_HHmmss'
@@ -239,6 +284,15 @@ function Send-ToastNotification {
             $parts += $updateText
         }
 
+        # Only mention pins when something actually happened to one
+        if (-not $SkippedUpdates -and ($Summary.PinsEnforced -gt 0 -or $Summary.PinsFailed.Count -gt 0)) {
+            $pinText = "Pinned $($Summary.PinsEnforced) modules"
+            if ($Summary.PinsFailed.Count -gt 0) {
+                $pinText += ", $($Summary.PinsFailed.Count) unsuccessful"
+            }
+            $parts += $pinText
+        }
+
         if (-not $SkippedPruning) {
             $pruneText = "Pruned $($Summary.VersionsPruned) versions"
             if ($Summary.PrunesFailed.Count -gt 0) {
@@ -247,7 +301,9 @@ function Send-ToastNotification {
             $parts += $pruneText
         }
 
-        $hasFailures = ($Summary.ModulesFailed.Count -gt 0) -or ($Summary.PrunesFailed.Count -gt 0)
+        $hasFailures = ($Summary.ModulesFailed.Count -gt 0) -or
+                       ($Summary.PrunesFailed.Count -gt 0) -or
+                       ($Summary.PinsFailed.Count -gt 0)
 
         $message = ($parts -join '. ') + '.'
         if (-not $hasFailures) {
@@ -304,6 +360,87 @@ catch {
 # ============================================================================
 # MODULE OPERATIONS
 # ============================================================================
+
+function ConvertTo-NormalizedVersion {
+    <#
+    .SYNOPSIS
+        Pads a version to four parts so 6.1907.1 and 6.1907.1.0 compare as equal.
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][version]$Version)
+
+    return [version]::new(
+        $Version.Major, $Version.Minor,
+        [Math]::Max($Version.Build, 0), [Math]::Max($Version.Revision, 0))
+}
+
+function Get-ModuleVersionKey {
+    <#
+    .SYNOPSIS
+        Builds a comparable string for an installed version, including its prerelease label.
+        PSResourceGet exposes the numeric version and prerelease label as separate properties.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][version]$Version,
+        [string]$Prerelease
+    )
+
+    $key = (ConvertTo-NormalizedVersion $Version).ToString()
+    if ($Prerelease) { $key += "-$Prerelease" }
+    return $key
+}
+
+function ConvertFrom-PinnedVersionString {
+    <#
+    .SYNOPSIS
+        Parses a pinned version such as '2.19.0' or '2.0.0-beta1'.
+        Returns $null if the string is not a valid version.
+    #>
+    [CmdletBinding()]
+    param([string]$Value)
+
+    if ([string]::IsNullOrWhiteSpace($Value)) { return $null }
+
+    $numeric, $prerelease = $Value.Trim() -split '-', 2
+    $parsed = $null
+    if (-not [version]::TryParse($numeric, [ref]$parsed)) { return $null }
+
+    return [PSCustomObject]@{
+        Version    = $parsed
+        Prerelease = $prerelease
+        Requested  = $Value.Trim()
+        Key        = Get-ModuleVersionKey -Version $parsed -Prerelease $prerelease
+    }
+}
+
+function Get-PinnedVersion {
+    <#
+    .SYNOPSIS
+        Returns the parsed pin for a module name, or $null if it is not pinned.
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$Name)
+
+    if ($script:Config.PinnedModules.ContainsKey($Name)) {
+        return $script:Config.PinnedModules[$Name]
+    }
+    return $null
+}
+
+function Test-IsPinnedVersion {
+    <#
+    .SYNOPSIS
+        Tests whether an installed PSResource matches the given pin.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]$Resource,
+        [Parameter(Mandatory)]$Pin
+    )
+
+    return (Get-ModuleVersionKey -Version $Resource.Version -Prerelease $Resource.Prerelease) -eq $Pin.Key
+}
 
 function Test-OneDrivePath {
     <#
@@ -466,7 +603,8 @@ namespace PSModuleMaintenance {
 function Invoke-ModuleUpdate {
     <#
     .SYNOPSIS
-        Runs Update-PSResource in an isolated runspace with a timeout.
+        Runs Update-PSResource in an isolated runspace with a timeout — or Install-PSResource
+        when -Version is given, which is how pinned modules are put back on their version.
         Prevents a single slow/hung module from consuming all scheduled task time.
     #>
     [CmdletBinding()]
@@ -478,13 +616,17 @@ function Invoke-ModuleUpdate {
 
         [bool]$TrustRepository = $true,
 
-        [int]$TimeoutSeconds = 600
+        [int]$TimeoutSeconds = 600,
+
+        [string]$Version,
+
+        [switch]$Prerelease
     )
 
     $ps = [powershell]::Create()
     try {
         $ps.AddScript({
-            param($n, $s, $t)
+            param($n, $s, $t, $v, $pre)
             $params = @{
                 Name            = $n
                 AcceptLicense   = $true
@@ -492,15 +634,27 @@ function Invoke-ModuleUpdate {
                 ErrorAction     = 'Stop'
             }
             if ($s) { $params['Scope'] = $s }
-            Update-PSResource @params
-        }).AddArgument($Name).AddArgument($Scope).AddArgument($TrustRepository) | Out-Null
+
+            if ($v) {
+                # PSResourceGet treats a bare version string as a required (exact) version
+                # rather than a minimum, so this installs precisely $v side-by-side with
+                # whatever else is present. See about_PSResourceGet, "NuGet version ranges".
+                $params['Version'] = $v
+                if ($pre) { $params['Prerelease'] = $true }
+                Install-PSResource @params
+            }
+            else {
+                Update-PSResource @params
+            }
+        }).AddArgument($Name).AddArgument($Scope).AddArgument($TrustRepository).
+            AddArgument($Version).AddArgument($Prerelease.IsPresent) | Out-Null
 
         $handle = $ps.BeginInvoke()
 
         if (-not $handle.AsyncWaitHandle.WaitOne([TimeSpan]::FromSeconds($TimeoutSeconds))) {
             $ps.Stop()
             throw [System.TimeoutException]::new(
-                "Update timed out after $TimeoutSeconds seconds for module '$Name'")
+                "Operation timed out after $TimeoutSeconds seconds for module '$Name'")
         }
 
         $ps.EndInvoke($handle) | Out-Null
@@ -512,6 +666,82 @@ function Invoke-ModuleUpdate {
     finally {
         $ps.Dispose()
     }
+}
+
+function Set-PinnedModuleVersions {
+    <#
+    .SYNOPSIS
+        Ensures every pinned module has its pinned version installed. Other versions are
+        left alone here — Remove-OldModuleVersions prunes everything except the pin.
+        Pinning never installs a module that isn't already present.
+    #>
+    [CmdletBinding(SupportsShouldProcess)]
+    param(
+        [Parameter(Mandatory)]
+        [AllowEmptyCollection()]
+        [array]$InstalledResources,
+
+        [string]$Scope
+    )
+
+    $pinnedNames = @($script:Config.PinnedModules.Keys)
+    if ($pinnedNames.Count -eq 0) { return }
+
+    Write-Log "Enforcing $($pinnedNames.Count) pinned module version(s)..."
+    $timeout = $script:Config.ModuleUpdateTimeoutSeconds
+
+    foreach ($name in $pinnedNames) {
+        $pin = $script:Config.PinnedModules[$name]
+        $versions = @($InstalledResources | Where-Object { $_.Name -eq $name })
+
+        if ($versions.Count -eq 0) {
+            Write-Log "Pinned module $name is not installed — nothing to enforce (pinning does not install new modules)"
+            continue
+        }
+
+        if ($versions | Where-Object { Test-IsPinnedVersion -Resource $_ -Pin $pin }) {
+            Write-Log "$name is at its pinned version $($pin.Requested)"
+            $script:Summary.PinsSatisfied++
+            continue
+        }
+
+        $installedList = ($versions | Sort-Object Version -Descending | ForEach-Object {
+            Get-ModuleVersionKey -Version $_.Version -Prerelease $_.Prerelease
+        }) -join ', '
+
+        try {
+            if ($PSCmdlet.ShouldProcess("$name -> $($pin.Requested)", "Install pinned version")) {
+                Write-Log "Installing pinned version of ${name}: $($pin.Requested) (installed: $installedList)"
+
+                $pinTimer = [System.Diagnostics.Stopwatch]::StartNew()
+
+                Invoke-ModuleUpdate -Name $name -Scope $Scope `
+                    -TrustRepository $script:Config.TrustPSGallery -TimeoutSeconds $timeout `
+                    -Version $pin.Requested -Prerelease:([bool]$pin.Prerelease)
+
+                $script:Summary.PinsEnforced++
+                Write-Log "Installed pinned version: $name $($pin.Requested) (took $([math]::Round($pinTimer.Elapsed.TotalSeconds))s)" -Level SUCCESS
+            }
+        }
+        catch [System.TimeoutException] {
+            Write-Log "Timed out installing pinned $name $($pin.Requested) after ${timeout}s — skipping" -Level ERROR
+            $script:Summary.PinsFailed += @{
+                Module  = $name
+                Version = $pin.Requested
+                Error   = $_.Exception.Message
+            }
+        }
+        catch {
+            Write-Log "Failed to install pinned $name $($pin.Requested): $($_.Exception.Message)" -Level ERROR
+            $script:Summary.PinsFailed += @{
+                Module  = $name
+                Version = $pin.Requested
+                Error   = $_.Exception.Message
+            }
+        }
+    }
+
+    Write-Log "Pin enforcement complete. Already pinned: $($script:Summary.PinsSatisfied), Installed: $($script:Summary.PinsEnforced), Unsuccessful: $($script:Summary.PinsFailed.Count)"
 }
 
 function Update-AllModules {
@@ -530,21 +760,35 @@ function Update-AllModules {
     # Get installed modules (newest version of each)
     # When OneDrive is detected, modules live in AllUsers scope — query that explicitly
     $getParams = if ($useAllUsersScope) { @{ Scope = 'AllUsers' } } else { @{} }
-    $installed = Get-PSResource @getParams |
-        Where-Object { $_.Name -notin $script:Config.ExcludedModules } |
+    $allResources = @(Get-PSResource @getParams |
+        Where-Object { $_.Name -notin $script:Config.ExcludedModules })
+
+    $installed = @($allResources |
         Group-Object Name |
         ForEach-Object {
             $newest = $_.Group | Sort-Object Version -Descending | Select-Object -First 1
             [PSCustomObject]@{ Name = $newest.Name; Version = $newest.Version }
-        }
+        })
 
     $script:Summary.ModulesChecked = $installed.Count
     $script:Summary.ExcludedModules = @($script:Config.ExcludedModules)
 
     Write-Log "Found $($installed.Count) installed modules (excluding: $($script:Config.ExcludedModules -join ', '))"
+
+    # Pinned modules are held at a specific version — enforce those before updating anything
+    $scope = if ($useAllUsersScope) { 'AllUsers' } else { $null }
+    Set-PinnedModuleVersions -InstalledResources $allResources -Scope $scope
+
+    if ($installed.Count -eq 0) {
+        Write-Log "No modules left to check for updates"
+        return
+    }
+
     Write-Log "Checking PSGallery for available updates..."
 
-    # Query PSGallery for latest versions (bulk request)
+    # Query PSGallery for latest versions (bulk request). Pinned modules stay in this query
+    # even though they will not be updated — it is the same single call either way, and it
+    # lets the log report which release a pin is holding back.
     try {
         $gallery = Find-PSResource -Name $installed.Name -Repository PSGallery -ErrorAction SilentlyContinue
     }
@@ -553,14 +797,37 @@ function Update-AllModules {
         return
     }
 
+    # Report what each pin is holding back, then drop pinned modules from the update flow
+    foreach ($mod in @($installed | Where-Object { Get-PinnedVersion $_.Name })) {
+        $pin = Get-PinnedVersion $mod.Name
+        $galleryVersion = ($gallery | Where-Object Name -eq $mod.Name |
+            Sort-Object Version -Descending | Select-Object -First 1).Version
+        if (-not $galleryVersion) { continue }
+
+        # Find-PSResource returns stable releases here, so a stable build of the same number
+        # is newer than a prerelease pin (2.0.0 beats 2.0.0-beta1)
+        $normalizedGallery = ConvertTo-NormalizedVersion $galleryVersion
+        $normalizedPin = ConvertTo-NormalizedVersion $pin.Version
+        if ($normalizedGallery -gt $normalizedPin -or ($normalizedGallery -eq $normalizedPin -and $pin.Prerelease)) {
+            Write-Log "$($mod.Name) is pinned to $($pin.Requested) — holding back $galleryVersion"
+            $script:Summary.PinsHoldingBack += @{
+                Module    = $mod.Name
+                Pinned    = $pin.Requested
+                Available = $galleryVersion.ToString()
+            }
+        }
+    }
+
+    $installed = @($installed | Where-Object { -not (Get-PinnedVersion $_.Name) })
+
     # Find modules that need updates
     $needsUpdate = @()
     foreach ($mod in $installed) {
         $galleryVersion = ($gallery | Where-Object Name -eq $mod.Name | Sort-Object Version -Descending | Select-Object -First 1).Version
         # Normalize versions to 4-part form so 6.1907.1 and 6.1907.1.0 compare as equal
         if ($galleryVersion -and $mod.Version) {
-            $normalizedInstalled = [version]::new($mod.Version.Major, $mod.Version.Minor, [Math]::Max($mod.Version.Build, 0), [Math]::Max($mod.Version.Revision, 0))
-            $normalizedGallery = [version]::new($galleryVersion.Major, $galleryVersion.Minor, [Math]::Max($galleryVersion.Build, 0), [Math]::Max($galleryVersion.Revision, 0))
+            $normalizedInstalled = ConvertTo-NormalizedVersion $mod.Version
+            $normalizedGallery = ConvertTo-NormalizedVersion $galleryVersion
         }
         if ($galleryVersion -and $normalizedGallery -gt $normalizedInstalled) {
             $needsUpdate += [PSCustomObject]@{
@@ -578,7 +845,6 @@ function Update-AllModules {
 
     Write-Log "Found $($needsUpdate.Count) modules with available updates"
 
-    $scope = if ($useAllUsersScope) { 'AllUsers' } else { $null }
     $timeout = $script:Config.ModuleUpdateTimeoutSeconds
 
     # Update only modules that need it
@@ -693,11 +959,27 @@ function Remove-OldModuleVersions {
         -not ($_.InstalledLocation -like "$psHomePath*")
     }
 
-    $grouped = $nonOneDriveModules | Group-Object Name | Where-Object { $_.Count -gt 1 }
+    # @() matters: a single surviving group is a bare GroupInfo, whose own .Count member is
+    # the number of versions in that group, not the number of groups
+    $grouped = @($nonOneDriveModules | Group-Object Name | Where-Object { $_.Count -gt 1 })
     Write-Log "Found $($grouped.Count) modules with multiple versions"
 
     foreach ($group in $grouped) {
-        $oldVersions = $group.Group | Sort-Object Version -Descending | Select-Object -Skip 1
+        $pin = Get-PinnedVersion $group.Name
+
+        if ($pin) {
+            # Pinned: the pin is what we keep, so everything else goes — newer versions included.
+            # If the pin isn't installed, prune nothing: removing the rest would leave the
+            # module with no version at all.
+            if (-not ($group.Group | Where-Object { Test-IsPinnedVersion -Resource $_ -Pin $pin })) {
+                Write-Log "$($group.Name) is pinned to $($pin.Requested) but that version is not installed — leaving all $($group.Count) installed version(s) in place" -Level WARN
+                continue
+            }
+            $oldVersions = $group.Group | Where-Object { -not (Test-IsPinnedVersion -Resource $_ -Pin $pin) }
+        }
+        else {
+            $oldVersions = $group.Group | Sort-Object Version -Descending | Select-Object -Skip 1
+        }
 
         foreach ($oldVersion in $oldVersions) {
             if ($PSCmdlet.ShouldProcess("$($oldVersion.Name) v$($oldVersion.Version)", "Remove old version")) {
@@ -799,9 +1081,20 @@ try {
     # Initialize logging
     Initialize-Logging -BasePath $LogPath
 
+    # Surface anything the config parser flagged before the log file existed
+    foreach ($configWarning in $script:ConfigWarnings) {
+        Write-Log $configWarning -Level WARN
+    }
+
+    # Record the effective pins in the summary (name -> version) so they show up even for -PruneOnly
+    foreach ($pinName in $script:Config.PinnedModules.Keys) {
+        $script:Summary.PinnedModules[$pinName] = $script:Config.PinnedModules[$pinName].Requested
+    }
+
     # Log configuration
     Write-Log "Configuration loaded:"
     Write-Log "  - Excluded modules: $($script:Config.ExcludedModules.Count)"
+    Write-Log "  - Pinned modules: $($script:Config.PinnedModules.Count)"
     Write-Log "  - Log retention: $($script:Config.LogRetentionDays) days"
     Write-Log "  - Trust PSGallery: $($script:Config.TrustPSGallery)"
     Write-Log "  - Notification mode: $($script:Config.NotificationMode)"
@@ -835,7 +1128,9 @@ finally {
 
     # Send toast notification based on config
     $notifyMode = $script:Config.NotificationMode
-    $hasFailures = ($script:Summary.ModulesFailed.Count -gt 0) -or ($script:Summary.PrunesFailed.Count -gt 0)
+    $hasFailures = ($script:Summary.ModulesFailed.Count -gt 0) -or
+                   ($script:Summary.PrunesFailed.Count -gt 0) -or
+                   ($script:Summary.PinsFailed.Count -gt 0)
 
     if ($notifyMode -eq 'Always' -or ($notifyMode -eq 'OnFailure' -and $hasFailures)) {
         Send-ToastNotification -Summary $script:Summary -SkippedUpdates:$PruneOnly -SkippedPruning:$UpdateOnly

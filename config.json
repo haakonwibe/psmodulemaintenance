@@ -3,9 +3,13 @@
   "_comment": "Configuration for PSModuleMaintenance",
   
   "ExcludedModules": [
-    
+
   ],
-  
+
+  "PinnedModules": {
+
+  },
+
   "LogRetentionDays": 180,
   
   "TrustPSGallery": true,

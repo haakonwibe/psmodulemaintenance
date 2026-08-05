@@ -23,6 +23,19 @@
         ["Az.Accounts", "Microsoft.Graph.Authentication"]
       ]
     },
+    "PinnedModules": {
+      "type": "object",
+      "description": "Modules held at a specific version. The pinned version is installed if missing, and pruning keeps it instead of the newest version. A module listed in ExcludedModules is skipped entirely and its pin is ignored.",
+      "additionalProperties": {
+        "type": "string",
+        "description": "Exact version to hold, optionally with a prerelease label (e.g. 2.19.0 or 2.0.0-beta1)",
+        "pattern": "^\\d+(\\.\\d+){0,3}(-[A-Za-z0-9.]+)?$"
+      },
+      "default": {},
+      "examples": [
+        { "Az.Accounts": "2.19.0", "Pester": "5.5.0" }
+      ]
+    },
     "LogRetentionDays": {
       "type": "integer",
       "description": "Number of days to retain log files before automatic cleanup",
