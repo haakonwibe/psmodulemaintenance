@@ -373,12 +373,13 @@ If you skip migration, the weekly maintenance script will still work (it detects
 1. **Load Configuration** — Reads `config.json` for exclusions and settings
 2. **Initialize Logging** — Creates timestamped log files and starts transcript
 3. **Resolve Monitoring Secret** — Reads the Healthchecks ping URL from the vault and sends a start ping. Done before any module work, because the script prunes `SecretManagement` itself
-4. **Clean Old Logs** — Removes logs older than retention period
-5. **Update Modules** — Bulk checks PSGallery for available updates, then updates each module in an isolated runspace with a per-module timeout (targets AllUsers scope when OneDrive is detected)
-6. **Prune Versions** — Groups modules by name, keeps newest, removes the rest (skips built-in modules like PackageManagement). When OneDrive is detected and modules are found in the CurrentUser path, logs a warning to run `Invoke-OneDriveMigration.ps1`
-7. **Save Summary** — Writes JSON summary after each phase (incremental saves protect against process termination)
-8. **Toast Notification** — Shows a Windows toast with the run summary (if enabled via `NotificationMode`)
-9. **Healthchecks Ping** — Sends a success or fail ping with the run summary as the body (if enabled)
+4. **Self-Check** — Warns if the scheduled task launches a hard-coded interpreter path that a PowerShell reinstall would break
+5. **Clean Old Logs** — Removes logs older than retention period
+6. **Update Modules** — Bulk checks PSGallery for available updates, then updates each module in an isolated runspace with a per-module timeout (targets AllUsers scope when OneDrive is detected)
+7. **Prune Versions** — Groups modules by name, keeps newest, removes the rest (skips built-in modules like PackageManagement). When OneDrive is detected and modules are found in the CurrentUser path, logs a warning to run `Invoke-OneDriveMigration.ps1`
+8. **Save Summary** — Writes JSON summary after each phase (incremental saves protect against process termination)
+9. **Toast Notification** — Shows a Windows toast with the run summary (if enabled via `NotificationMode`)
+10. **Healthchecks Ping** — Sends a success or fail ping with the run summary as the body (if enabled)
 
 ## Troubleshooting
 
@@ -388,6 +389,46 @@ Check Task Scheduler history. Common issues:
 - Script path changed after installation
 - User password changed (re-run installer)
 - Network not available at scheduled time
+- **PowerShell was reinstalled to a different directory** (see below)
+
+#### PowerShell reinstalled, task silently stops running
+
+This is the nastiest failure mode, because it leaves *no evidence*. The task fails to
+start, so the script never runs — meaning no log file, no summary, no toast. The only
+symptom is a week with no log at all.
+
+It happens when the task was registered with a hard-coded interpreter path and PowerShell
+later moves. MSI, the Microsoft Store package and pwshup ZIP installs all live in different
+directories, so switching between them relocates `pwsh.exe`.
+
+Current versions register the task with a **bare** `pwsh.exe`, which Task Scheduler
+re-resolves from PATH at every run. A task created by an older installer keeps its baked-in
+path until you re-register it:
+
+```powershell
+# Run as Administrator
+.\Install-ModuleMaintenance.ps1
+```
+
+You do not need to guess whether you are affected — each run checks and logs a warning:
+
+```
+[WARN] Scheduled task 'PSModuleMaintenance' has a hard-coded interpreter path
+       (C:\Program Files\PowerShell\7\pwsh.exe). It works today but stops working if
+       PowerShell is reinstalled elsewhere — re-run Install-ModuleMaintenance.ps1 as
+       Administrator to switch it to PATH resolution
+```
+
+To check the registration by hand:
+
+```powershell
+(Get-ScheduledTask -TaskName PSModuleMaintenance).Actions.Execute
+# "pwsh.exe"                              -> resilient
+# "C:\Program Files\PowerShell\7\pwsh.exe" -> fragile, re-run the installer
+```
+
+[Monitoring](#monitoring) is the backstop: even a task that never starts trips the
+Healthchecks dead-man's switch within a day.
 
 ### Modules fail to update
 

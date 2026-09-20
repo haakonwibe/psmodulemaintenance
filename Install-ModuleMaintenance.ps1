@@ -117,12 +117,21 @@ function Install-MaintenanceTask {
         Unregister-ScheduledTask -TaskName $Name -Confirm:$false
     }
 
-    # Get pwsh.exe path
-    $pwshPath = (Get-Command pwsh.exe -ErrorAction Stop).Source
+    # Resolve pwsh only to VALIDATE that it is on PATH and to report it below. The task
+    # is deliberately registered with the BARE name so Task Scheduler re-resolves it at
+    # every run.
+    #
+    # A hard-coded interpreter path breaks whenever PowerShell is reinstalled to a
+    # different directory - MSI, the Store package and pwshup ZIP installs all use
+    # different locations - and the task then fails to start with no log, no toast and
+    # no trace, because nothing the script writes ever runs. That is exactly what
+    # happened on 2026-09-13. Task Scheduler resolving a bare executable name against
+    # PATH was verified before making this change.
+    $resolvedPwsh = (Get-Command pwsh.exe -ErrorAction Stop).Source
 
     # Build the action (hidden window for silent background execution)
     $actionArgument = "-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File `"$scriptFullPath`""
-    $action = New-ScheduledTaskAction -Execute $pwshPath -Argument $actionArgument
+    $action = New-ScheduledTaskAction -Execute 'pwsh.exe' -Argument $actionArgument
 
     # Build the trigger (weekly)
     $trigger = New-ScheduledTaskTrigger -Weekly -DaysOfWeek $Day -At $RunTime
@@ -159,6 +168,8 @@ function Install-MaintenanceTask {
     Write-Host ""
     Write-Host "Task Name    : $Name"
     Write-Host "Script       : $scriptFullPath"
+    Write-Host "Interpreter  : pwsh.exe (resolved from PATH at each run)"
+    Write-Host "  currently  : $resolvedPwsh" -ForegroundColor Gray
     Write-Host "Schedule     : Every $Day at $RunTime"
     Write-Host "Run As       : $currentUser"
     Write-Host "Elevated     : Yes"

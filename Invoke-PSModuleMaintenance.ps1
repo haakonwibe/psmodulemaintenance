@@ -587,6 +587,70 @@ function Send-HealthchecksPing {
 }
 
 # ============================================================================
+# SELF-CHECKS
+# ============================================================================
+
+function Test-ScheduledTaskHealth {
+    <#
+    .SYNOPSIS
+        Warns when a scheduled task pointing at this script launches a hard-coded
+        interpreter path instead of resolving pwsh.exe from PATH.
+
+        A baked-in path stops working the moment PowerShell is reinstalled to a
+        different directory, and it fails *before* anything in this script runs — no
+        log, no toast, no trace. A run that currently works is the only opportunity to
+        warn about it in advance, which is why the check lives here rather than in the
+        installer.
+
+        Read-only and best-effort: it never throws and never modifies the task.
+    #>
+    [CmdletBinding()]
+    param()
+
+    try {
+        $thisScript = $PSCommandPath
+        if (-not $thisScript) { return }
+
+        $tasks = @(Get-ScheduledTask -ErrorAction Stop | Where-Object {
+            $argString = @($_.Actions.Arguments) -join ' '
+            $argString -and $argString.Contains($thisScript, [StringComparison]::OrdinalIgnoreCase)
+        })
+
+        if ($tasks.Count -eq 0) {
+            Write-Log "No scheduled task references this script — running ad hoc"
+            return
+        }
+
+        foreach ($task in $tasks) {
+            $taskName = $task.TaskName
+            foreach ($action in @($task.Actions)) {
+                $exe = $action.Execute
+                if (-not $exe) { continue }
+
+                # A bare name has no directory separator, so Task Scheduler re-resolves
+                # it from PATH on every run — which is what we want
+                if ($exe -notmatch '[\\/]') {
+                    Write-Log "Scheduled task '$taskName' launches '$exe' from PATH — survives a PowerShell reinstall"
+                    continue
+                }
+
+                if (Test-Path $exe) {
+                    Write-Log "Scheduled task '$taskName' has a hard-coded interpreter path ($exe). It works today but stops working if PowerShell is reinstalled elsewhere — re-run Install-ModuleMaintenance.ps1 as Administrator to switch it to PATH resolution" -Level WARN
+                }
+                else {
+                    Write-Log "Scheduled task '$taskName' points at an interpreter that no longer exists ($exe) — re-run Install-ModuleMaintenance.ps1 as Administrator" -Level WARN
+                }
+            }
+        }
+    }
+    catch {
+        # Enumerating tasks can be denied or slow depending on machine policy; this is a
+        # diagnostic nicety, never a reason to disrupt maintenance
+        Write-Verbose "Could not inspect scheduled task registration: $_"
+    }
+}
+
+# ============================================================================
 # MODULE OPERATIONS
 # ============================================================================
 
@@ -1395,6 +1459,9 @@ try {
     # SecretManagement itself, so the secret is read while the module is still loadable
     $script:HealthchecksUrl = Get-HealthchecksUrl
     Send-HealthchecksPing -PingType Start
+
+    # Flag a fragile task registration while the script can still be heard
+    Test-ScheduledTaskHealth
 
     # Clean up old logs
     Remove-OldLogs -BasePath $LogPath -RetentionDays $script:Config.LogRetentionDays
