@@ -472,7 +472,11 @@ function Format-HealthchecksBody {
     $duration = 'unknown'
     if ($Summary.StartTime -and $Summary.EndTime) {
         $span = [datetime]$Summary.EndTime - [datetime]$Summary.StartTime
-        $duration = '{0}m {1}s' -f [int]$span.TotalMinutes, $span.Seconds
+        # Floor, not [int] — a PowerShell [int] cast ROUNDS, so a 51s run would report
+        # "1m 51s" (TotalMinutes 0.85 rounds to 1). TotalMinutes rather than .Minutes so
+        # a run past the hour reads "75m 30s" instead of wrapping to "15m 30s"
+        $totalMinutes = [int][math]::Floor($span.TotalMinutes)
+        $duration = '{0}m {1}s' -f $totalMinutes, $span.Seconds
     }
 
     $checked = $Summary.ModulesChecked
