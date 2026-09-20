@@ -835,6 +835,24 @@ function Invoke-ModuleUpdate {
         Runs Update-PSResource in an isolated runspace with a timeout — or Install-PSResource
         when -Version is given, which is how pinned modules are put back on their version.
         Prevents a single slow/hung module from consuming all scheduled task time.
+
+    .NOTES
+        The deadline is enforced with a Stopwatch and a check of the pipeline's own
+        InvocationStateInfo, NOT by trusting AsyncWaitHandle.WaitOne's return value.
+
+        Two separate faults made the original WaitOne + Stop() approach ineffective:
+
+        1. Stop() BLOCKS until non-cooperative native work finishes. PSResourceGet's
+           network and file I/O do not cooperate, so a timed-out module still consumed
+           its full runtime — measured at 20s for a 5s timeout in a controlled repro.
+        2. WaitOne was observed returning $true while the pipeline was still running,
+           after which EndInvoke silently absorbed the remaining time and the module was
+           reported as a SUCCESS. On 2026-09-20 Microsoft.Graph ran 1261s against a 600s
+           timeout and logged SUCCESS; every other module that run took 1-7s.
+
+        Hence: poll in short slices against a Stopwatch, treat only a terminal pipeline
+        state as completion, and request the stop asynchronously so a stubborn native
+        call cannot re-block the main thread.
     #>
     [CmdletBinding()]
     param(
@@ -852,10 +870,26 @@ function Invoke-ModuleUpdate {
         [switch]$Prerelease
     )
 
+    # How long to give an asynchronous stop before abandoning the runspace. Deliberately
+    # short: a cooperative pipeline stops in well under a second, and one blocked in a
+    # native call will not stop no matter how long we wait. So this checks whether the
+    # stop took effect promptly — it is not a wait for the work to finish.
+    $stopGraceSeconds = 5
+
     $ps = [powershell]::Create()
+    $abandoned = $false
+
     try {
         $ps.AddScript({
             param($n, $s, $t, $v, $pre)
+
+            # The isolated runspace gets a fresh session state, so the parent script's
+            # $ProgressPreference = 'SilentlyContinue' does NOT carry over. Without this
+            # the progress records pile up in $ps.Streams.Progress for the whole update
+            # (measured at 20,000 records in a controlled repro) for no benefit, since
+            # nothing renders them in a scheduled task.
+            $ProgressPreference = 'SilentlyContinue'
+
             $params = @{
                 Name            = $n
                 AcceptLicense   = $true
@@ -880,10 +914,34 @@ function Invoke-ModuleUpdate {
 
         $handle = $ps.BeginInvoke()
 
-        if (-not $handle.AsyncWaitHandle.WaitOne([TimeSpan]::FromSeconds($TimeoutSeconds))) {
-            $ps.Stop()
+        # A terminal state is the only trustworthy signal that the pipeline is done.
+        # WaitOne's return value is not: see the timeout notes in the comment block above.
+        $terminalStates = @('Completed', 'Failed', 'Stopped')
+        $timer = [System.Diagnostics.Stopwatch]::StartNew()
+        $deadline = [TimeSpan]::FromSeconds($TimeoutSeconds)
+
+        while (($timer.Elapsed -lt $deadline) -and
+               ($ps.InvocationStateInfo.State -notin $terminalStates)) {
+            # Short slices rather than one long wait, so a spurious signal just costs
+            # another lap instead of dropping us out of the loop early
+            $handle.AsyncWaitHandle.WaitOne(500) | Out-Null
+        }
+
+        if ($ps.InvocationStateInfo.State -notin $terminalStates) {
+            $elapsed = [math]::Round($timer.Elapsed.TotalSeconds)
+
+            # BeginStop, not Stop: the synchronous Stop() blocks until the underlying
+            # native work finishes, which is exactly what defeats the timeout
+            $stopHandle = $ps.BeginStop($null, $null)
+            $stoppedInTime = $stopHandle.AsyncWaitHandle.WaitOne(
+                [TimeSpan]::FromSeconds($stopGraceSeconds))
+
+            # If it ignored the stop request, leave the runspace to the garbage collector.
+            # Disposing one whose pipeline is still winding down can block just as badly.
+            $abandoned = -not $stoppedInTime
+
             throw [System.TimeoutException]::new(
-                "Operation timed out after $TimeoutSeconds seconds for module '$Name'")
+                "Operation timed out after ${elapsed}s (limit ${TimeoutSeconds}s) for module '$Name'")
         }
 
         $ps.EndInvoke($handle) | Out-Null
@@ -893,7 +951,9 @@ function Invoke-ModuleUpdate {
         }
     }
     finally {
-        $ps.Dispose()
+        if (-not $abandoned) {
+            $ps.Dispose()
+        }
     }
 }
 
