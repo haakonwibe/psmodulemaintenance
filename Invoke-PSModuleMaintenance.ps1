@@ -67,11 +67,26 @@ $script:Config = @{
     TrustPSGallery = $true
     NotificationMode = 'Always'
     ModuleUpdateTimeoutSeconds = 600
+    Healthchecks = @{
+        Enabled        = $false
+        SecretName     = 'PSModuleMaintenance-Healthchecks'
+        SecretVault    = 'SecretStore'
+        TimeoutSeconds = 10
+    }
 }
 
 # Config is loaded before logging starts, so problems found there are queued and
 # written to the log once Initialize-Logging has run
 $script:ConfigWarnings = @()
+
+# Healthchecks ping URL, resolved once at startup from the SecretManagement vault.
+# Held in memory for the run and deliberately never written to the log, the transcript
+# or the summary JSON — the ping URL is a bearer secret
+$script:HealthchecksUrl = $null
+
+# Set by the main catch block before it rethrows, so the finally block can tell a
+# crash apart from a clean finish when deciding which ping to send
+$script:FatalError = $null
 
 function ConvertTo-PinnedModuleTable {
     <#
@@ -123,6 +138,15 @@ function Import-MaintenanceConfig {
             }
             if ($null -ne $jsonConfig.ModuleUpdateTimeoutSeconds) {
                 $script:Config.ModuleUpdateTimeoutSeconds = $jsonConfig.ModuleUpdateTimeoutSeconds
+            }
+            if ($null -ne $jsonConfig.Healthchecks) {
+                # Merge key by key so a config that sets only Enabled keeps the other defaults
+                foreach ($hcKey in @('Enabled', 'SecretName', 'SecretVault', 'TimeoutSeconds')) {
+                    $hcValue = $jsonConfig.Healthchecks.$hcKey
+                    if ($null -ne $hcValue) {
+                        $script:Config.Healthchecks[$hcKey] = $hcValue
+                    }
+                }
             }
 
             # A module that is both excluded and pinned is contradictory — exclusion means
@@ -354,6 +378,207 @@ catch {
     }
     catch {
         Write-Log "Toast notification failed: $_" -Level WARN
+    }
+}
+
+# ============================================================================
+# HEALTHCHECKS MONITORING
+# ============================================================================
+
+function Get-HealthchecksUrl {
+    <#
+    .SYNOPSIS
+        Resolves the Healthchecks ping URL from the SecretManagement vault.
+
+        Must be called before any update or prune work. This script updates and prunes
+        SecretManagement and SecretStore themselves — they live under
+        C:\Program Files\PowerShell\Modules — so the secret has to be read while the
+        module is still guaranteed loadable.
+
+        Returns $null on any problem instead of throwing. That is the point: no ping
+        means the check goes overdue and Healthchecks alerts, so broken monitoring
+        surfaces as a notification rather than as silence.
+    #>
+    [CmdletBinding()]
+    param()
+
+    $hc = $script:Config.Healthchecks
+
+    if (-not $hc.Enabled) {
+        Write-Log "Healthchecks monitoring is off"
+        return $null
+    }
+
+    $secretName = $hc.SecretName
+    $secretVault = $hc.SecretVault
+
+    try {
+        Import-Module Microsoft.PowerShell.SecretManagement -ErrorAction Stop
+
+        $secretParams = @{
+            Name        = $secretName
+            AsPlainText = $true
+            ErrorAction = 'Stop'
+        }
+        # Name the vault explicitly rather than relying on which one is flagged default
+        if ($secretVault) { $secretParams['Vault'] = $secretVault }
+
+        $url = Get-Secret @secretParams
+    }
+    catch {
+        $reason = $_.Exception.Message
+        Write-Log "Healthchecks ping URL unavailable ($reason) - runs will not be monitored. Store it with: Set-Secret -Name '$secretName' -Vault '$secretVault'" -Level WARN
+        return $null
+    }
+
+    if ([string]::IsNullOrWhiteSpace($url)) {
+        Write-Log "Healthchecks secret '$secretName' is empty - runs will not be monitored" -Level WARN
+        return $null
+    }
+
+    $url = $url.Trim().TrimEnd('/')
+
+    if ($url -notmatch '^https?://') {
+        Write-Log "Healthchecks secret '$secretName' is not an http(s) URL - runs will not be monitored" -Level WARN
+        return $null
+    }
+
+    Write-Log "Healthchecks monitoring is on"
+    return $url
+}
+
+function Format-HealthchecksBody {
+    <#
+    .SYNOPSIS
+        Builds the plain-text ping body posted alongside the success/fail ping.
+
+        Includes the machine name, because one Healthchecks account may cover several
+        machines. Deliberately omits the user and domain: the body is embedded in alert
+        emails, chat messages and webhook payloads, and the account name adds nothing
+        diagnostically.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        $Summary,
+
+        [string]$Mode = 'Full',
+
+        [switch]$IsFailure
+    )
+
+    $status = if ($IsFailure) { 'Fail' } else { 'Success' }
+
+    $duration = 'unknown'
+    if ($Summary.StartTime -and $Summary.EndTime) {
+        $span = [datetime]$Summary.EndTime - [datetime]$Summary.StartTime
+        $duration = '{0}m {1}s' -f [int]$span.TotalMinutes, $span.Seconds
+    }
+
+    $checked = $Summary.ModulesChecked
+    $updated = $Summary.ModulesUpdated
+    $pruned = $Summary.VersionsPruned
+    $pinsEnforced = $Summary.PinsEnforced
+    $pinsSatisfied = $Summary.PinsSatisfied
+    $pinsHolding = @($Summary.PinsHoldingBack).Count
+    $machine = $env:COMPUTERNAME
+
+    $lines = @(
+        "PSModuleMaintenance - $status"
+        "Host: $machine   Mode: $Mode   Duration: $duration"
+        "Checked: $checked  Updated: $updated  Pruned: $pruned"
+        "Pins: $pinsEnforced enforced, $pinsSatisfied satisfied, $pinsHolding holding back"
+    )
+
+    $issues = @()
+    foreach ($item in @($Summary.ModulesFailed)) {
+        $issues += "  - update $($item.Module): $($item.Error)"
+    }
+    foreach ($item in @($Summary.PrunesFailed)) {
+        $issues += "  - prune $($item.Module) $($item.Version): $($item.Error)"
+    }
+    foreach ($item in @($Summary.PinsFailed)) {
+        $issues += "  - pin $($item.Module): $($item.Error)"
+    }
+
+    if ($issues.Count -gt 0) {
+        $lines += "Issues: $($issues.Count)"
+        $lines += $issues
+    }
+    else {
+        $lines += "Issues: none"
+    }
+
+    if ($script:LogFile) {
+        $lines += "Log: $script:LogFile"
+    }
+
+    $body = $lines -join "`n"
+
+    # Healthchecks caps the stored body; keep it well under and leave a marker if trimmed
+    if ($body.Length -gt 10240) {
+        $body = $body.Substring(0, 10240) + "`n[truncated]"
+    }
+
+    return $body
+}
+
+function Send-HealthchecksPing {
+    <#
+    .SYNOPSIS
+        Sends a start, success or fail ping. Never throws — a monitoring problem must
+        not be able to break a maintenance run.
+
+        Pings are suppressed under -WhatIf, which is the opposite of how logging is
+        handled in this script. Write-Log and Save-Summary pass -WhatIf:$false so dry
+        runs still produce a log and a summary. A ping must go the other way: a success
+        ping from a dry run would reset the dead-man timer and hide a scheduled run that
+        never happened. Invoke-RestMethod has no ShouldProcess of its own, so the check
+        has to be made explicitly here rather than inherited.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [ValidateSet('Start', 'Success', 'Fail')]
+        [string]$PingType,
+
+        [string]$Body
+    )
+
+    if (-not $script:HealthchecksUrl) { return }
+
+    if ($WhatIfPreference) {
+        Write-Log "Healthchecks ping skipped (WhatIf): $PingType"
+        return
+    }
+
+    $suffix = switch ($PingType) {
+        'Start' { '/start' }
+        'Fail'  { '/fail' }
+        default { '' }
+    }
+
+    try {
+        $requestParams = @{
+            Uri               = "$script:HealthchecksUrl$suffix"
+            Method            = 'Post'
+            TimeoutSec        = $script:Config.Healthchecks.TimeoutSeconds
+            MaximumRetryCount = 2
+            RetryIntervalSec  = 5
+            ErrorAction       = 'Stop'
+        }
+
+        if ($Body) {
+            $requestParams['Body'] = $Body
+            $requestParams['ContentType'] = 'text/plain; charset=utf-8'
+        }
+
+        Invoke-RestMethod @requestParams | Out-Null
+        Write-Log "Healthchecks ping sent: $PingType"
+    }
+    catch {
+        $reason = $_.Exception.Message
+        Write-Log "Healthchecks ping ($PingType) failed: $reason" -Level WARN
     }
 }
 
@@ -1099,6 +1324,13 @@ try {
     Write-Log "  - Trust PSGallery: $($script:Config.TrustPSGallery)"
     Write-Log "  - Notification mode: $($script:Config.NotificationMode)"
     Write-Log "  - Module update timeout: $($script:Config.ModuleUpdateTimeoutSeconds)s"
+    $hcEnabled = $script:Config.Healthchecks.Enabled
+    Write-Log "  - Healthchecks monitoring: $hcEnabled"
+
+    # Resolve the ping URL before any update or prune work — this script prunes
+    # SecretManagement itself, so the secret is read while the module is still loadable
+    $script:HealthchecksUrl = Get-HealthchecksUrl
+    Send-HealthchecksPing -PingType Start
 
     # Clean up old logs
     Remove-OldLogs -BasePath $LogPath -RetentionDays $script:Config.LogRetentionDays
@@ -1119,6 +1351,8 @@ try {
     Write-Log "======================================================"
 }
 catch {
+    # Recorded so the finally block can distinguish a crash from a clean finish
+    $script:FatalError = $_
     Write-Log "Critical error: $_" -Level ERROR
     throw
 }
@@ -1135,6 +1369,14 @@ finally {
     if ($notifyMode -eq 'Always' -or ($notifyMode -eq 'OnFailure' -and $hasFailures)) {
         Send-ToastNotification -Summary $script:Summary -SkippedUpdates:$PruneOnly -SkippedPruning:$UpdateOnly
     }
+
+    # Healthchecks closing ping. Reuses the same $hasFailures rule the toast uses, so the
+    # two notification channels can never disagree about what counts as a failure
+    $runMode = if ($UpdateOnly) { 'UpdateOnly' } elseif ($PruneOnly) { 'PruneOnly' } else { 'Full' }
+    $isFailure = ($null -ne $script:FatalError) -or $hasFailures
+    $pingBody = Format-HealthchecksBody -Summary $script:Summary -Mode $runMode -IsFailure:$isFailure
+    $pingType = if ($isFailure) { 'Fail' } else { 'Success' }
+    Send-HealthchecksPing -PingType $pingType -Body $pingBody
 
     # Stop transcript
     Stop-Transcript -ErrorAction SilentlyContinue | Out-Null

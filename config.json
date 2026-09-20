@@ -16,5 +16,12 @@
 
   "NotificationMode": "Always",
 
-  "ModuleUpdateTimeoutSeconds": 600
+  "ModuleUpdateTimeoutSeconds": 600,
+
+  "Healthchecks": {
+    "Enabled": true,
+    "SecretName": "PSModuleMaintenance-Healthchecks",
+    "SecretVault": "SecretStore",
+    "TimeoutSeconds": 10
+  }
 }

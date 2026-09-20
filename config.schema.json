@@ -60,6 +60,35 @@
       "minimum": 60,
       "maximum": 3600,
       "default": 600
+    },
+    "Healthchecks": {
+      "type": "object",
+      "description": "Healthchecks.io dead-man's-switch monitoring. The ping URL itself is a bearer secret and is NOT stored here — keep it in the SecretManagement vault, e.g. Set-Secret -Name PSModuleMaintenance-Healthchecks -Secret 'https://hc-ping.com/<uuid>' -Vault SecretStore",
+      "properties": {
+        "Enabled": {
+          "type": "boolean",
+          "description": "Whether to send start/success/fail pings. Pings are always suppressed during a -WhatIf run so a dry run cannot reset the dead-man timer.",
+          "default": false
+        },
+        "SecretName": {
+          "type": "string",
+          "description": "Name of the secret holding the full ping URL",
+          "default": "PSModuleMaintenance-Healthchecks"
+        },
+        "SecretVault": {
+          "type": "string",
+          "description": "SecretManagement vault to read the ping URL from. Named explicitly rather than relying on the default-vault flag.",
+          "default": "SecretStore"
+        },
+        "TimeoutSeconds": {
+          "type": "integer",
+          "description": "HTTP timeout per ping attempt. Each ping is retried twice before giving up.",
+          "minimum": 1,
+          "maximum": 120,
+          "default": 10
+        }
+      },
+      "additionalProperties": false
     }
   },
   "additionalProperties": false

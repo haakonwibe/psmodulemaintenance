@@ -18,6 +18,11 @@
 .PARAMETER Time
     Time to run (24h format). Defaults to '03:00'.
 
+.PARAMETER HealthchecksUrl
+    Full Healthchecks.io ping URL (e.g. https://hc-ping.com/<uuid>). Stored in the
+    SecretManagement vault rather than config.json, which is tracked in git. Optional —
+    omit it to leave any existing secret untouched.
+
 .PARAMETER Uninstall
     Remove the scheduled task instead of creating it.
 
@@ -26,6 +31,9 @@
 
 .EXAMPLE
     .\Install-ModuleMaintenance.ps1 -DayOfWeek Saturday -Time "04:30"
+
+.EXAMPLE
+    .\Install-ModuleMaintenance.ps1 -HealthchecksUrl "https://hc-ping.com/your-uuid-here"
 
 .EXAMPLE
     .\Install-ModuleMaintenance.ps1 -Uninstall
@@ -50,6 +58,10 @@ param(
     [Parameter()]
     [ValidatePattern('^\d{1,2}:\d{2}$')]
     [string]$Time = '03:00',
+
+    [Parameter()]
+    [ValidatePattern('^https?://')]
+    [string]$HealthchecksUrl,
 
     [Parameter()]
     [switch]$Uninstall
@@ -155,6 +167,48 @@ function Install-MaintenanceTask {
     Write-Host ""
 }
 
+function Set-HealthchecksSecret {
+    <#
+    .SYNOPSIS
+        Stores the Healthchecks ping URL in the SecretManagement vault and verifies the
+        vault can actually be read from a non-interactive scheduled task.
+
+        The ping URL is a bearer secret — anyone holding it can send fake success pings
+        and suppress real alerts — so it stays out of the git-tracked config.json.
+    #>
+    param(
+        [string]$Url,
+        [string]$SecretName = 'PSModuleMaintenance-Healthchecks',
+        [string]$VaultName = 'SecretStore'
+    )
+
+    Import-Module Microsoft.PowerShell.SecretManagement -ErrorAction Stop
+    Set-Secret -Name $SecretName -Secret $Url -Vault $VaultName -ErrorAction Stop
+
+    Write-Host "Healthchecks : Ping URL stored in vault '$VaultName' as '$SecretName'" -ForegroundColor Green
+
+    # A password-protected vault blocks Get-Secret indefinitely in a non-interactive task,
+    # so catch that here rather than letting it fail silently at 03:00
+    try {
+        Import-Module Microsoft.PowerShell.SecretStore -ErrorAction Stop
+        $storeConfig = Get-SecretStoreConfiguration -ErrorAction Stop
+        $auth = $storeConfig.Authentication
+        $interaction = $storeConfig.Interaction
+
+        if ($auth -ne 'None' -or $interaction -ne 'None') {
+            Write-Host ""
+            Write-Host "WARNING: SecretStore is set to Authentication='$auth', Interaction='$interaction'." -ForegroundColor Yellow
+            Write-Host "         The scheduled task runs non-interactively, so Get-Secret will block" -ForegroundColor Yellow
+            Write-Host "         and no pings will be sent. Fix with:" -ForegroundColor Yellow
+            Write-Host "         Set-SecretStoreConfiguration -Authentication None -Interaction None" -ForegroundColor Yellow
+            Write-Host ""
+        }
+    }
+    catch {
+        Write-Host "Could not verify SecretStore configuration: $_" -ForegroundColor Yellow
+    }
+}
+
 function Test-ManualRun {
     param([string]$Name)
 
@@ -189,6 +243,11 @@ try {
 
     # Install the task
     Install-MaintenanceTask -Name $TaskName -Script $ScriptPath -Day $DayOfWeek -RunTime $Time
+
+    # Store the Healthchecks ping URL if one was supplied
+    if ($HealthchecksUrl) {
+        Set-HealthchecksSecret -Url $HealthchecksUrl
+    }
 
     # Offer test run
     Test-ManualRun -Name $TaskName

@@ -13,6 +13,7 @@ Automated PowerShell module maintenance for Windows. Updates all PSResourceGet-m
 - ⏰ **Scheduled Execution** — Runs weekly via Windows Task Scheduler
 - 🔔 **Toast Notifications** — Optional Windows toast notifications after each run
 - 🛡️ **Per-Module Timeout** — Each module update runs in an isolated runspace with a configurable timeout, preventing one slow module from blocking the entire run
+- 📡 **Healthchecks.io Monitoring** — Optional dead-man's switch that alerts when a scheduled run never happens, not just when one fails
 
 ## Requirements
 
@@ -44,7 +45,13 @@ Edit `config.json` to exclude or pin specific modules:
   "LogRetentionDays": 180,
   "TrustPSGallery": true,
   "NotificationMode": "Always",
-  "ModuleUpdateTimeoutSeconds": 600
+  "ModuleUpdateTimeoutSeconds": 600,
+  "Healthchecks": {
+    "Enabled": true,
+    "SecretName": "PSModuleMaintenance-Healthchecks",
+    "SecretVault": "SecretStore",
+    "TimeoutSeconds": 10
+  }
 }
 ```
 
@@ -112,6 +119,18 @@ Run the maintenance script directly:
 | `TrustPSGallery` | bool | `true` | Trust PSGallery during updates (avoids prompts) |
 | `NotificationMode` | string | `"Always"` | Toast notifications: `"Always"`, `"OnFailure"`, or `"Never"` |
 | `ModuleUpdateTimeoutSeconds` | int | `600` | Max seconds per module update before timing out and moving to the next |
+| `Healthchecks` | object | see below | Healthchecks.io monitoring (see [Monitoring](#monitoring)) |
+
+### Healthchecks sub-settings
+
+| Setting | Type | Default | Description |
+|---------|------|---------|-------------|
+| `Enabled` | bool | `false` | Send start/success/fail pings |
+| `SecretName` | string | `"PSModuleMaintenance-Healthchecks"` | Vault secret holding the full ping URL |
+| `SecretVault` | string | `"SecretStore"` | SecretManagement vault to read from |
+| `TimeoutSeconds` | int | `10` | HTTP timeout per ping attempt (retried twice) |
+
+**The ping URL is never stored in `config.json`** — it is a bearer secret, and `config.json` is tracked in git.
 
 ## Version Pinning
 
@@ -163,6 +182,90 @@ PSModuleMaintenance can show a Windows toast notification after each run. Set `N
 - **`"Never"`** — No notifications
 
 The toast uses the built-in Windows "Security and Maintenance" notification channel — no additional setup required.
+
+## Monitoring
+
+Toast notifications only fire when the script runs. A run that never *starts* — a broken
+`pwsh.exe` path, a disabled task, a machine that never wakes — is completely silent.
+Healthchecks.io monitoring closes that gap with a dead-man's switch: the alert fires on the
+**absence** of a ping.
+
+### Setup
+
+Store the full ping URL in the SecretManagement vault. It is a bearer secret — anyone
+holding it can send fake success pings and suppress your real alerts — so it stays out of
+the git-tracked `config.json`:
+
+```powershell
+Set-Secret -Name PSModuleMaintenance-Healthchecks `
+           -Secret 'https://hc-ping.com/your-uuid-here' -Vault SecretStore
+```
+
+Or let the installer do it:
+
+```powershell
+.\Install-ModuleMaintenance.ps1 -HealthchecksUrl "https://hc-ping.com/your-uuid-here"
+```
+
+Then set `Healthchecks.Enabled` to `true` in `config.json`.
+
+The vault must be readable non-interactively, or the scheduled task will block on
+`Get-Secret`. The installer warns if it is not. To configure it yourself:
+
+```powershell
+Set-SecretStoreConfiguration -Authentication None -Interaction None
+```
+
+Storing the **full URL** rather than just the UUID means self-hosted Healthchecks instances
+work with no extra configuration.
+
+### Configuring the check
+
+Use a **Period** schedule, not cron:
+
+| Setting | Value |
+|---------|-------|
+| Schedule | Period, 7 days |
+| Grace | 1 day |
+
+A cron schedule matching the task (`0 3 * * 0`) looks correct but produces false alarms.
+The task uses `StartWhenAvailable`, so a sleeping machine catches up hours late — one
+observed run fired at 06:29 instead of 03:00. A period-based check tolerates that while
+still reporting a missed week within a day.
+
+### What gets sent
+
+- A start ping when the run begins, so Healthchecks can track duration and spot a run that
+  started but never finished.
+- A success or fail ping at the end, with the run summary as the body:
+
+```
+PSModuleMaintenance - Fail
+Host: WIBE-PC   Mode: Full   Duration: 24m 21s
+Checked: 164  Updated: 45  Pruned: 45
+Pins: 0 enforced, 0 satisfied, 0 holding back
+Issues: 1
+  - prune Az.Accounts 5.5.2: Access to the path 'FuzzySharp.dll' is denied.
+Log: C:\ProgramData\PSModuleMaintenance\Logs\maintenance_2026-09-20_063047.log
+```
+
+The body includes the machine name so one account can cover several machines, but
+deliberately omits the user and domain — the body is embedded in alert emails, chat
+messages and webhook payloads.
+
+Any non-empty `ModulesFailed`, `PrunesFailed`, or `PinsFailed` sends a fail ping, using the
+same rule as `NotificationMode: OnFailure` so the two channels never disagree.
+
+### Behaviour notes
+
+- **`-WhatIf` sends no pings at all.** A success ping from a dry run would reset the
+  dead-man timer and hide a genuinely missed scheduled run.
+- **A ping failure never fails the run.** Network problems are logged as a warning and the
+  maintenance continues.
+- **A broken vault is not silent.** If the secret cannot be read, the script logs a warning
+  and carries on — and because no ping is sent, Healthchecks alerts you. Broken monitoring
+  surfaces as a notification rather than as silence.
+- A manual `-UpdateOnly` or `-PruneOnly` run also pings, with `Mode:` naming it in the body.
 
 ## Logs
 
@@ -269,11 +372,13 @@ If you skip migration, the weekly maintenance script will still work (it detects
 
 1. **Load Configuration** — Reads `config.json` for exclusions and settings
 2. **Initialize Logging** — Creates timestamped log files and starts transcript
-3. **Clean Old Logs** — Removes logs older than retention period
-4. **Update Modules** — Bulk checks PSGallery for available updates, then updates each module in an isolated runspace with a per-module timeout (targets AllUsers scope when OneDrive is detected)
-5. **Prune Versions** — Groups modules by name, keeps newest, removes the rest (skips built-in modules like PackageManagement). When OneDrive is detected and modules are found in the CurrentUser path, logs a warning to run `Invoke-OneDriveMigration.ps1`
-6. **Save Summary** — Writes JSON summary after each phase (incremental saves protect against process termination)
-7. **Toast Notification** — Shows a Windows toast with the run summary (if enabled via `NotificationMode`)
+3. **Resolve Monitoring Secret** — Reads the Healthchecks ping URL from the vault and sends a start ping. Done before any module work, because the script prunes `SecretManagement` itself
+4. **Clean Old Logs** — Removes logs older than retention period
+5. **Update Modules** — Bulk checks PSGallery for available updates, then updates each module in an isolated runspace with a per-module timeout (targets AllUsers scope when OneDrive is detected)
+6. **Prune Versions** — Groups modules by name, keeps newest, removes the rest (skips built-in modules like PackageManagement). When OneDrive is detected and modules are found in the CurrentUser path, logs a warning to run `Invoke-OneDriveMigration.ps1`
+7. **Save Summary** — Writes JSON summary after each phase (incremental saves protect against process termination)
+8. **Toast Notification** — Shows a Windows toast with the run summary (if enabled via `NotificationMode`)
+9. **Healthchecks Ping** — Sends a success or fail ping with the run summary as the body (if enabled)
 
 ## Troubleshooting
 
