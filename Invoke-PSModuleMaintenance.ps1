@@ -231,6 +231,11 @@ function Import-MaintenanceConfig {
         }
         catch {
             Write-Warning "Failed to parse config file: $_. Using defaults."
+
+            # Write-Warning only reaches the console, and nobody watches the console of a
+            # scheduled task. Without this line a typo in the config would drop every
+            # exclusion, pin and kept version without a trace in the log
+            $script:ConfigWarnings += "Could not read the config file, so the built-in defaults are in use and no module is excluded, pinned or kept: $($_.Exception.Message)"
         }
     }
     else {

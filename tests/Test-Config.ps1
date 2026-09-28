@@ -153,6 +153,13 @@ try {
     Assert-That ($script:Config.KeepVersions.Count -eq 0) 'a list where an object belongs is ignored'
     Assert-That (@($script:ConfigWarnings | Where-Object { $_ -like 'Ignoring KeepVersions: it has to be an object*' }).Count -eq 1) 'and reported'
     Assert-That ($script:Config.LogRetentionDays -eq 30) 'the rest of that file still loads'
+
+    # --- A config file that cannot be read -------------------------------------------
+    Write-Section 'A config file that cannot be read'
+
+    Import-TestConfig '{ "ExcludedModules": ["Contoso.Tools"], '
+    Assert-That (@($script:Config.ExcludedModules).Count -eq 0) 'the defaults are in force'
+    Assert-That (@($script:ConfigWarnings | Where-Object { $_ -like 'Could not read the config file*' }).Count -eq 1) 'and the log is told, not only the console'
 }
 finally {
     if (Test-Path -LiteralPath $configFolder) {
