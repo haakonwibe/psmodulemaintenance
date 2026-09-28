@@ -124,9 +124,9 @@ function Install-MaintenanceTask {
     # A hard-coded interpreter path breaks whenever PowerShell is reinstalled to a
     # different directory - MSI, the Store package and pwshup ZIP installs all use
     # different locations - and the task then fails to start with no log, no toast and
-    # no trace, because nothing the script writes ever runs. That is exactly what
-    # happened on 2026-09-13. Task Scheduler resolving a bare executable name against
-    # PATH was verified before making this change.
+    # no trace, because nothing the script writes ever runs. That has happened. Task
+    # Scheduler resolving a bare executable name against PATH was verified before making
+    # this change.
     $resolvedPwsh = (Get-Command pwsh.exe -ErrorAction Stop).Source
 
     # Build the action (hidden window for silent background execution)

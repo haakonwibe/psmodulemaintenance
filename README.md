@@ -230,9 +230,8 @@ Use a **Period** schedule, not cron:
 | Grace | 1 day |
 
 A cron schedule matching the task (`0 3 * * 0`) looks correct but produces false alarms.
-The task uses `StartWhenAvailable`, so a sleeping machine catches up hours late — one
-observed run fired at 06:29 instead of 03:00. A period-based check tolerates that while
-still reporting a missed week within a day.
+The task uses `StartWhenAvailable`, so a sleeping machine catches up hours late. A
+period-based check tolerates that while still reporting a missed week within a day.
 
 ### What gets sent
 
@@ -242,12 +241,12 @@ still reporting a missed week within a day.
 
 ```
 PSModuleMaintenance - Fail
-Host: WIBE-PC   Mode: Full   Duration: 24m 21s
-Checked: 164  Updated: 45  Pruned: 45
+Host: DESKTOP-01   Mode: Full   Duration: 4m 21s
+Checked: 150  Updated: 12  Pruned: 11
 Pins: 0 enforced, 0 satisfied, 0 holding back
 Issues: 1
-  - prune Az.Accounts 5.5.2: Access to the path 'FuzzySharp.dll' is denied.
-Log: C:\ProgramData\PSModuleMaintenance\Logs\maintenance_2026-09-20_063047.log
+  - prune Contoso.Tools 1.4.0: Access to the path 'Contoso.Tools.dll' is denied.
+Log: C:\ProgramData\PSModuleMaintenance\Logs\maintenance_2024-01-15_030000.log
 ```
 
 The body includes the machine name so one account can cover several machines, but
@@ -487,9 +486,9 @@ be reached, the run says so and is reported as unsuccessful — it does **not** 
 everything is up to date:
 
 ```
-[WARN] PSGallery gave no answer for 164 module(s) (attempt 1 of 3): No such host is known. Retrying in 5s
-[WARN] PSGallery gave no answer for 164 module(s) (attempt 2 of 3): No such host is known. Retrying in 15s
-[ERROR] Could not reach PSGallery, so none of the 164 installed modules were checked for updates: ...
+[WARN] PSGallery gave no answer for 150 module(s) (attempt 1 of 3): No such host is known. Retrying in 5s
+[WARN] PSGallery gave no answer for 150 module(s) (attempt 2 of 3): No such host is known. Retrying in 15s
+[ERROR] Could not reach PSGallery, so none of the 150 installed modules were checked for updates: ...
 [WARN] PSModuleMaintenance completed with 1 unsuccessful operation(s) (lookups: 1, updates: 0, pins: 0, prunes: 0)
 ```
 

@@ -10,16 +10,16 @@ run that never happens raises an alert instead of passing unnoticed.
 
 ## Motivation
 
-On 2026-09-13 the weekly run did not happen. No `maintenance_2026-09-13_*.log` was ever
-created, meaning the script never started: `C:\Program Files\PowerShell\7\pwsh.exe` was
-missing while the machine was on the Store build of PowerShell, and the scheduled task
-action hard-codes that path. The task was healed on 2026-09-19 when a pwshup-managed ZIP
-install restored the directory, and the 2026-09-20 run completed normally.
+A weekly run did not happen. No log file was ever created for it, meaning the script never
+started: the scheduled task action hard-codes the path to `pwsh.exe`, and that path had
+stopped existing after PowerShell was reinstalled to a different directory. The task
+started working again once a later reinstall happened to restore the directory, and the
+following run completed normally.
 
 Nothing surfaced the miss:
 
 - `LastTaskResult` reports only the most recent run and read `0x0` afterwards.
-- The Task Scheduler operational log is disabled on this machine.
+- The Task Scheduler operational log is disabled by default.
 - Toast notifications only fire when the script runs, so a script that never runs is silent.
 
 Every existing signal is emitted *by the script*. A run that never starts produces no
@@ -135,8 +135,8 @@ $pingEvent = if ($script:FatalError -or $hasFailures) { 'Fail' } else { 'Success
 Send-HealthchecksPing -Event $pingEvent -Body (Format-HealthchecksBody)
 ```
 
-Any non-empty `ModulesFailed`, `PrunesFailed`, or `PinsFailed` sends `/fail`. The
-2026-09-06 locked-file prune failure would have gone red under this rule.
+Any non-empty `ModulesFailed`, `PrunesFailed`, or `PinsFailed` sends `/fail`. A prune that
+fails on a locked file goes red under this rule.
 
 If the script dies before `Get-HealthchecksUrl` — a malformed `config.json`, say — no ping
 is sent at all and the absence alerts. Correct by construction.
@@ -145,12 +145,12 @@ is sent at all and the absence alerts. Correct by construction.
 
 ```
 PSModuleMaintenance — Fail
-Host: WIBE-PC   Mode: Full   Duration: 24m 21s
-Checked: 164  Updated: 45  Pruned: 45
+Host: DESKTOP-01   Mode: Full   Duration: 4m 21s
+Checked: 150  Updated: 12  Pruned: 11
 Pins: 0 enforced, 0 satisfied, 0 holding back
 Issues: 1 prune failure
-  - Az.Accounts 5.5.2: Access to the path 'FuzzySharp.dll' is denied.
-Log: C:\ProgramData\PSModuleMaintenance\Logs\maintenance_2026-09-20_063047.log
+  - Contoso.Tools 1.4.0: Access to the path 'Contoso.Tools.dll' is denied.
+Log: C:\ProgramData\PSModuleMaintenance\Logs\maintenance_2024-01-15_030000.log
 ```
 
 The `Log:` line points the alert email straight at the file to open.
@@ -175,9 +175,9 @@ becomes a problem, a `-NoPing` switch is a one-liner.
 Use a **Period** schedule, not cron.
 
 The obvious choice is cron `0 3 * * 0` matching the weekly task. The run logs argue against
-it: the 2026-09-20 run started at **06:29, not 03:00**, because the machine was asleep and
-`StartWhenAvailable` caught up 3.5 hours late. Under cron with a tight grace period, every
-sleeping machine produces a false alarm.
+it: a machine that is asleep at the scheduled time runs the task when it wakes, and
+`StartWhenAvailable` has been seen catching up hours late. Under cron with a tight grace
+period, every sleeping machine produces a false alarm.
 
 | Setting | Value |
 | --- | --- |
@@ -185,7 +185,7 @@ sleeping machine produces a false alarm.
 | Grace | 1 day |
 
 This tolerates arbitrary catch-up timing while still reporting a missed week within a day.
-The 2026-09-13 miss would have alerted on 2026-09-14.
+The missed run that prompted this design would have alerted the day after.
 
 ## Installation
 
@@ -219,7 +219,7 @@ a non-interactive scheduled task.
 ## Out of Scope
 
 - Fixing the per-module timeout defect found during design: `ModuleUpdateTimeoutSeconds` is
-  600 yet the 2026-09-20 log shows `Updated: Microsoft.Graph (took 1261s)` on the plain
-  success path. Tracked separately; it is why the grace period cannot assume a bounded run.
+  600, yet a log shows a module taking more than twice that on the plain success path.
+  Tracked separately; it is why the grace period cannot assume a bounded run.
 - Monitoring the scheduled task's own existence or its hard-coded `pwsh.exe` path.
-- Migrating the remaining OneDrive module (`Microsoft.PowerToys.Configure`).
+- Modules left in the OneDrive module path.

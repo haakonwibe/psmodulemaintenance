@@ -273,8 +273,8 @@ function Get-SummaryFailures {
     .NOTES
         The gallery lookup counts once, however many modules it left unchecked. An outage
         is one thing going wrong, and counting it per module turned a single unreachable
-        gallery into "164 unsuccessful operations". How many modules were affected is
-        still in Summary.ModulesUnchecked and in the log.
+        gallery into one unsuccessful operation for every installed module. How many
+        modules were affected is still in Summary.ModulesUnchecked and in the log.
 
         It does have to count, though. Leaving it out is how an unreachable gallery used
         to pass as a clean run.
@@ -1035,8 +1035,8 @@ function Invoke-ModuleUpdate {
            its full runtime — measured at 20s for a 5s timeout in a controlled repro.
         2. WaitOne was observed returning $true while the pipeline was still running,
            after which EndInvoke silently absorbed the remaining time and the module was
-           reported as a SUCCESS. On 2026-09-20 Microsoft.Graph ran 1261s against a 600s
-           timeout and logged SUCCESS; every other module that run took 1-7s.
+           reported as a SUCCESS. In one run a large meta-module took more than twice the
+           600s timeout and logged SUCCESS, while every other module took a few seconds.
 
         Hence: poll in short slices against a Stopwatch, treat only a terminal pipeline
         state as completion, and request the stop asynchronously so a stubborn native
@@ -1198,10 +1198,10 @@ function Invoke-ModuleUpdateWithRetry {
         existing catch blocks.
 
     .NOTES
-        On 2026-09-27 both pending updates failed 2s apart with "The SSL connection could
-        not be established". The task had fired seconds after the machine left Modern
-        Standby and joined a phone hotspot. The same call succeeded later that day, but
-        with no retry each module had to wait a week for the next run.
+        In one run every pending update failed within seconds with "The SSL connection
+        could not be established". The task had fired right after the machine woke up,
+        before the network had settled. The same call succeeded later that day, but with
+        no retry each module had to wait a week for the next run.
 
         Not retried:
         - Timeouts. The module already used its whole ModuleUpdateTimeoutSeconds, and
@@ -1352,7 +1352,8 @@ function Find-GalleryModules {
         under -ErrorAction SilentlyContinue an unreachable gallery just returns nothing.
         The run then logged "All modules are up to date" and sent a Success ping, which
         reset the dead-man timer on a run that had checked nothing. Measured behind a dead
-        proxy on 2026-09-27: 164 modules took 5m34s to fail without a word.
+        proxy: about two seconds per installed module, several minutes in all, without a
+        word in the log.
 
         SilentlyContinue has to stay, because "not on the gallery" is an everyday answer
         for a module installed from somewhere else. The two cases are told apart by error
@@ -1909,8 +1910,8 @@ try {
     }
 
     # The closing line has to agree with the toast and the ping. It used to claim success
-    # unconditionally, which on 2026-09-27 put "completed successfully" directly above a
-    # Fail ping for a run where both updates had been unsuccessful
+    # unconditionally, which could put "completed successfully" directly above a Fail
+    # ping for a run whose updates had been unsuccessful
     $failures = Get-SummaryFailures -Summary $script:Summary
 
     Write-Log "======================================================"
