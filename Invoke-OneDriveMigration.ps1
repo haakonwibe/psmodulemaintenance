@@ -397,80 +397,80 @@ foreach ($moduleFolder in $moduleFolders) {
 Write-Log "Copy phase complete. Copied: $copiedCount, Unsuccessful: $($copyFailures.Count)"
 
 # --- Phase 2: Clean up OneDrive copies ---
-if ($SkipCleanup) {
-    Write-Log "Cleanup skipped (-SkipCleanup). OneDrive copies remain in place."
-}
-elseif ($copiedCount -eq 0 -and $copyFailures.Count -eq 0) {
-    Write-Log "All modules already exist in AllUsers — checking for leftover OneDrive copies"
+# Set here, not inside the cleanup, so the summary has a number whichever way this goes
+$removedCount = 0
+$removeFailures = @()
 
-    # Still run cleanup even if nothing was copied (previous partial run may have left copies)
-    $odModuleFolders = Get-ChildItem -Path $currentUserModulePath -Directory -ErrorAction SilentlyContinue
-    $hasVersionFolders = $false
-    foreach ($mf in $odModuleFolders) {
-        if ($mf.Name -in $leftInPlace) { continue }
-
-        $vf = Get-ChildItem -Path $mf.FullName -Directory -ErrorAction SilentlyContinue |
-            Where-Object { $_.Name -match '^\d+(\.\d+){1,3}$' }
-        if ($vf) { $hasVersionFolders = $true; break }
-    }
-
-    if (-not $hasVersionFolders) {
-        Write-Log "No version folders found in OneDrive path — nothing to clean up"
-    }
-}
-
+# What there is to clean up is worked out once, and the log then says one thing. It used
+# to say "nothing to clean up" and go on to "Cleaning up OneDrive copies" all the same.
+# A module that was left in place is not ours to clean up. What counts is a module folder
+# that holds version folders, or an empty one left behind by an earlier run. A run that
+# copied nothing still cleans up, because an earlier run may have been cut short
+$toClean = @()
 if (-not $SkipCleanup) {
     $odModuleFolders = Get-ChildItem -Path $currentUserModulePath -Directory -ErrorAction SilentlyContinue
 
-    if ($odModuleFolders.Count -gt 0) {
-        Write-Log "Cleaning up OneDrive copies from: $currentUserModulePath"
+    foreach ($moduleFolder in $odModuleFolders) {
+        # Never delete what was not copied. These belong to another program
+        if ($moduleFolder.Name -in $leftInPlace) { continue }
 
-        $removedCount = 0
-        $removeFailures = @()
-        $rebootScheduled = 0
+        $versionFolders = Get-ChildItem -Path $moduleFolder.FullName -Directory -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -match '^\d+(\.\d+){1,3}$' }
+        $isEmpty = @(Get-ChildItem -Path $moduleFolder.FullName -Force -ErrorAction SilentlyContinue).Count -eq 0
 
-        foreach ($moduleFolder in $odModuleFolders) {
-            # Never delete what was not copied. These belong to another program
-            if ($moduleFolder.Name -in $leftInPlace) { continue }
+        if ($versionFolders -or $isEmpty) {
+            $toClean += $moduleFolder
+        }
+    }
+}
 
-            $versionFolders = Get-ChildItem -Path $moduleFolder.FullName -Directory -ErrorAction SilentlyContinue |
-                Where-Object { $_.Name -match '^\d+(\.\d+){1,3}$' }
+if ($SkipCleanup) {
+    Write-Log "Cleanup skipped (-SkipCleanup). OneDrive copies remain in place."
+}
+elseif ($toClean.Count -eq 0) {
+    Write-Log "Nothing to clean up in the OneDrive path"
+}
+else {
+    Write-Log "Cleaning up OneDrive copies from: $currentUserModulePath"
 
-            foreach ($versionFolder in $versionFolders) {
-                $moduleName = $moduleFolder.Name
-                $versionName = $versionFolder.Name
+    foreach ($moduleFolder in $toClean) {
+        $versionFolders = Get-ChildItem -Path $moduleFolder.FullName -Directory -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -match '^\d+(\.\d+){1,3}$' }
 
-                if ($PSCmdlet.ShouldProcess("$moduleName v$versionName (OneDrive copy)", "Remove migrated copy")) {
-                    Write-Log "Removing OneDrive copy: $moduleName v$versionName"
+        foreach ($versionFolder in $versionFolders) {
+            $moduleName = $moduleFolder.Name
+            $versionName = $versionFolder.Name
 
-                    try {
-                        Remove-Item -Path $versionFolder.FullName -Recurse -Force -ErrorAction Stop
+            if ($PSCmdlet.ShouldProcess("$moduleName v$versionName (OneDrive copy)", "Remove migrated copy")) {
+                Write-Log "Removing OneDrive copy: $moduleName v$versionName"
+
+                try {
+                    Remove-Item -Path $versionFolder.FullName -Recurse -Force -ErrorAction Stop
+                    $removedCount++
+                    Write-Log "Removed: $moduleName v$versionName" -Level SUCCESS
+                }
+                catch {
+                    Write-Log "OneDrive lock on $moduleName — attempting force-removal" -Level WARN
+                    if (Remove-LockedModuleFolder -FolderPath $versionFolder.FullName) {
                         $removedCount++
-                        Write-Log "Removed: $moduleName v$versionName" -Level SUCCESS
+                        Write-Log "Force-removed: $moduleName v$versionName" -Level SUCCESS
                     }
-                    catch {
-                        Write-Log "OneDrive lock on $moduleName — attempting force-removal" -Level WARN
-                        if (Remove-LockedModuleFolder -FolderPath $versionFolder.FullName) {
-                            $removedCount++
-                            Write-Log "Force-removed: $moduleName v$versionName" -Level SUCCESS
-                        }
-                        else {
-                            Write-Log "Failed to remove OneDrive copy $moduleName v${versionName}: $($_.Exception.Message)" -Level WARN
-                            $removeFailures += "$moduleName v$versionName"
-                        }
+                    else {
+                        Write-Log "Failed to remove OneDrive copy $moduleName v${versionName}: $($_.Exception.Message)" -Level WARN
+                        $removeFailures += "$moduleName v$versionName"
                     }
                 }
             }
-
-            # Clean up empty module folder after all versions removed
-            if ((Test-Path $moduleFolder.FullName) -and
-                @(Get-ChildItem -Path $moduleFolder.FullName -Force -ErrorAction SilentlyContinue).Count -eq 0) {
-                Remove-Item -Path $moduleFolder.FullName -Force -ErrorAction SilentlyContinue
-            }
         }
 
-        Write-Log "Cleanup complete. Removed: $removedCount, Unsuccessful: $($removeFailures.Count)"
+        # Clean up empty module folder after all versions removed
+        if ((Test-Path $moduleFolder.FullName) -and
+            @(Get-ChildItem -Path $moduleFolder.FullName -Force -ErrorAction SilentlyContinue).Count -eq 0) {
+            Remove-Item -Path $moduleFolder.FullName -Force -ErrorAction SilentlyContinue
+        }
     }
+
+    Write-Log "Cleanup complete. Removed: $removedCount, Unsuccessful: $($removeFailures.Count)"
 }
 
 # --- Summary ---

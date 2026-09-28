@@ -649,6 +649,7 @@ stand in only for the calls that would touch the network or the machine.
 | `Test-ModuleOwnership.ps1` | Telling modules installed by PSResourceGet from another program's, and finding a version on disk |
 | `Test-Config.ps1` | That `config.example.json` is valid, matches the built-in defaults, and that a missing `config.json` is fine. Loading `KeepVersions`, and a config file that cannot be read |
 | `Test-KeepVersions.ps1` | Version lines: what a selector covers, what is kept and what is pruned, which lines are updated and to what |
+| `Test-Migration.ps1` | The OneDrive migration, run as a whole against a made-up folder tree: what is copied, what is left in place, what is cleaned up, and what the log says |
 
 ## Contributing
 
