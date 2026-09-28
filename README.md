@@ -254,8 +254,10 @@ The body includes the machine name so one account can cover several machines, bu
 deliberately omits the user and domain — the body is embedded in alert emails, chat
 messages and webhook payloads.
 
-Any non-empty `ModulesFailed`, `PrunesFailed`, or `PinsFailed` sends a fail ping, using the
-same rule as `NotificationMode: OnFailure` so the two channels never disagree.
+Any non-empty `ModulesFailed`, `PrunesFailed`, or `PinsFailed` sends a fail ping, and so
+does a non-zero `ModulesUnchecked` — a run that could not reach PSGallery has not checked
+anything, so it must not reset the timer. It is the same rule as
+`NotificationMode: OnFailure`, so the two channels never disagree.
 
 ### Behaviour notes
 
@@ -286,6 +288,8 @@ C:\ProgramData\PSModuleMaintenance\Logs\
   "StartTime": "2024-01-15T03:00:00.0000000+01:00",
   "EndTime": "2024-01-15T03:05:12.0000000+01:00",
   "ModulesChecked": 79,
+  "ModulesUnchecked": 0,
+  "GalleryFault": null,
   "ModulesUpdated": 12,
   "ModulesFailed": [],
   "VersionsPruned": 45,
@@ -302,6 +306,8 @@ C:\ProgramData\PSModuleMaintenance\Logs\
 ```
 
 `PinsSatisfied` counts modules already on their pinned version, `PinsEnforced` counts pins this run had to install, and `PinsHoldingBack` lists the newer releases each pin is declining — useful for periodically reviewing whether a pin is still needed.
+
+`ModulesUnchecked` counts installed modules that PSGallery gave no answer for, with the reason in `GalleryFault`. `ModulesChecked` excludes them, so an unreachable gallery reads `"ModulesChecked": 0` rather than looking like a full check that found nothing. A module that simply is not on PSGallery counts as checked.
 
 ## Uninstall
 
@@ -376,7 +382,7 @@ If you skip migration, the weekly maintenance script will still work (it detects
 3. **Resolve Monitoring Secret** — Reads the Healthchecks ping URL from the vault and sends a start ping. Done before any module work, because the script prunes `SecretManagement` itself
 4. **Self-Check** — Warns if the scheduled task launches a hard-coded interpreter path that a PowerShell reinstall would break
 5. **Clean Old Logs** — Removes logs older than retention period
-6. **Update Modules** — Bulk checks PSGallery for available updates, then updates each module in an isolated runspace with a per-module timeout (targets AllUsers scope when OneDrive is detected). Transient network faults are retried; timeouts are not
+6. **Update Modules** — Bulk checks PSGallery for available updates, then updates each module in an isolated runspace with a per-module timeout (targets AllUsers scope when OneDrive is detected). Transient network faults are retried; timeouts are not. If PSGallery cannot be reached at all, the run is reported as unsuccessful instead of as up to date
 7. **Prune Versions** — Groups modules by name, keeps newest, removes the rest (skips built-in modules like PackageManagement). When OneDrive is detected and modules are found in the CurrentUser path, logs a warning to run `Invoke-OneDriveMigration.ps1`
 8. **Save Summary** — Writes JSON summary after each phase (incremental saves protect against process termination)
 9. **Toast Notification** — Shows a Windows toast with the run summary (if enabled via `NotificationMode`)
@@ -453,11 +459,30 @@ A module that succeeds on a later attempt counts as a normal success. Only a mod
 fails all three attempts is reported as unsuccessful, and the run then ends with:
 
 ```
-[WARN] PSModuleMaintenance completed with 1 unsuccessful operation(s) (updates: 1, pins: 0, prunes: 0)
+[WARN] PSModuleMaintenance completed with 1 unsuccessful operation(s) (lookups: 0, updates: 1, pins: 0, prunes: 0)
 ```
 
 This matters most on laptops: the task uses `StartWhenAvailable`, so a missed 03:00 run
 fires the moment the machine wakes, often before the network has settled.
+
+#### PSGallery unreachable
+
+The check for available updates is retried on the same schedule. If PSGallery still cannot
+be reached, the run says so and is reported as unsuccessful — it does **not** claim that
+everything is up to date:
+
+```
+[WARN] PSGallery gave no answer for 164 module(s) (attempt 1 of 3): No such host is known. Retrying in 5s
+[WARN] PSGallery gave no answer for 164 module(s) (attempt 2 of 3): No such host is known. Retrying in 15s
+[ERROR] Could not reach PSGallery, so none of the 164 installed modules were checked for updates: ...
+[WARN] PSModuleMaintenance completed with 164 unsuccessful operation(s) (lookups: 164, updates: 0, pins: 0, prunes: 0)
+```
+
+Pruning still runs, since it needs no network. If only some lookups go unanswered, the rest
+are updated as normal and the log names the modules that were skipped.
+
+A module that is installed but not published on PSGallery is not a fault and is never
+reported this way.
 
 ### Module update timed out
 

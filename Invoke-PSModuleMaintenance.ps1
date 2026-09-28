@@ -179,6 +179,8 @@ $script:Summary = @{
     StartTime = $null
     EndTime = $null
     ModulesChecked = 0
+    ModulesUnchecked = 0
+    GalleryFault = $null
     ModulesUpdated = 0
     ModulesFailed = @()
     VersionsPruned = 0
@@ -267,6 +269,9 @@ function Get-SummaryFailureCount {
         Number of operations that did not succeed this run. This is the one definition of
         "the run had failures", shared by the closing log line, the toast and the
         Healthchecks ping so the three cannot disagree.
+
+        A module that could not be looked up counts. It was not maintained this run, and
+        leaving it out is how an unreachable gallery used to pass as a clean run.
     #>
     [CmdletBinding()]
     [OutputType([int])]
@@ -275,7 +280,8 @@ function Get-SummaryFailureCount {
         [hashtable]$Summary
     )
 
-    return $Summary.ModulesFailed.Count +
+    return $Summary.ModulesUnchecked +
+           $Summary.ModulesFailed.Count +
            $Summary.PrunesFailed.Count +
            $Summary.PinsFailed.Count
 }
@@ -323,6 +329,9 @@ function Send-ToastNotification {
             $updateText = "Updated $($Summary.ModulesUpdated) modules"
             if ($Summary.ModulesFailed.Count -gt 0) {
                 $updateText += ", $($Summary.ModulesFailed.Count) unsuccessful"
+            }
+            if ($Summary.ModulesUnchecked -gt 0) {
+                $updateText += ", $($Summary.ModulesUnchecked) not checked"
             }
             $parts += $updateText
         }
@@ -512,6 +521,9 @@ function Format-HealthchecksBody {
     )
 
     $issues = @()
+    if ($Summary.ModulesUnchecked -gt 0) {
+        $issues += "  - lookup: $($Summary.ModulesUnchecked) module(s) not checked: $($Summary.GalleryFault)"
+    }
     foreach ($item in @($Summary.ModulesFailed)) {
         $issues += "  - update $($item.Module): $($item.Error)"
     }
@@ -1234,6 +1246,129 @@ function Set-PinnedModuleVersions {
     Write-Log "Pin enforcement complete. Already pinned: $($script:Summary.PinsSatisfied), Installed: $($script:Summary.PinsEnforced), Unsuccessful: $($script:Summary.PinsFailed.Count)"
 }
 
+function Find-GalleryModules {
+    <#
+    .SYNOPSIS
+        The bulk PSGallery lookup for Update-AllModules, able to tell "no update
+        available" apart from "could not ask".
+
+    .NOTES
+        Find-PSResource reports a network fault as a NON-terminating error per module, so
+        under -ErrorAction SilentlyContinue an unreachable gallery just returns nothing.
+        The run then logged "All modules are up to date" and sent a Success ping, which
+        reset the dead-man timer on a run that had checked nothing. Measured behind a dead
+        proxy on 2026-09-27: 164 modules took 5m34s to fail without a word.
+
+        SilentlyContinue has to stay, because "not on the gallery" is an everyday answer
+        for a module installed from somewhere else. The two cases are told apart by error
+        id, which survives here even though it does not survive the isolated runspace:
+            PackageNotFound    answered, the module is simply not on PSGallery
+            anything else      not answered (HttpRequestCallFailure for a network fault)
+
+        One known module is looked up before the bulk query. If that fails the bulk query
+        is not sent, which keeps a dead network from costing one failed request per
+        installed module. Unanswered lookups are retried on the same schedule as updates,
+        and only the modules still without an answer are asked about again.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string[]]$Name,
+
+        # Seconds to wait before each retry. One entry per retry, so two entries means
+        # three attempts in total
+        [int[]]$RetryDelaySeconds = @(5, 15)
+    )
+
+    # Certain to be on PSGallery: this script requires it and updates it from there
+    $probeName = 'Microsoft.PowerShell.PSResourceGet'
+
+    $found = @()
+    $pending = @($Name)
+    $detail = $null
+    $maxAttempts = $RetryDelaySeconds.Count + 1
+
+    for ($attempt = 1; $attempt -le $maxAttempts; $attempt++) {
+        $unanswered = @()
+        $lookupErrors = @()
+
+        try {
+            Find-PSResource -Name $probeName -Repository PSGallery -ErrorAction Stop | Out-Null
+
+            $batch = @(Find-PSResource -Name $pending -Repository PSGallery `
+                -ErrorAction SilentlyContinue -ErrorVariable lookupErrors)
+            $found += $batch
+
+            $notFoundErrors = @($lookupErrors | Where-Object { $_.FullyQualifiedErrorId -like 'PackageNotFound,*' })
+            $unanswered = @($lookupErrors | Where-Object { $_.FullyQualifiedErrorId -notlike 'PackageNotFound,*' })
+
+            # The name is only available inside the message. If a future PSResourceGet
+            # words it differently, these modules stay in $pending and are counted as
+            # unchecked, which errs on the side of reporting too much
+            $notOnGallery = @($notFoundErrors | ForEach-Object {
+                if ($_.Exception.Message -match "'([^']+)'") { $Matches[1] }
+            })
+            $pending = @($pending | Where-Object { ($_ -notin $batch.Name) -and ($_ -notin $notOnGallery) })
+        }
+        catch {
+            # The probe failed, or the bulk query threw outright. Either way nothing
+            # still pending got an answer this attempt
+            $unanswered = @($_)
+        }
+
+        if ($unanswered.Count -eq 0) {
+            $pending = @()
+            $detail = $null
+            break
+        }
+
+        $detail = $unanswered[0].Exception.Message
+
+        if ($attempt -lt $maxAttempts) {
+            $delay = $RetryDelaySeconds[$attempt - 1]
+            $pendingCount = $pending.Count
+            $reason = Get-GalleryFaultText -Message $detail
+            Write-Log "PSGallery gave no answer for $pendingCount module(s) (attempt $attempt of $maxAttempts): $reason. Retrying in ${delay}s" -Level WARN
+            Start-Sleep -Seconds $delay
+        }
+    }
+
+    $fault = $null
+    if ($detail) {
+        $fault = Get-GalleryFaultText -Message $detail
+    }
+
+    return [PSCustomObject]@{
+        Resources = $found
+        Unchecked = @($pending)
+        Fault     = $fault
+        Detail    = $detail
+    }
+}
+
+function Get-GalleryFaultText {
+    <#
+    .SYNOPSIS
+        A lookup error cut down to something that fits a log line, a toast or a ping body.
+        The full text runs to several hundred characters because it carries the request URL.
+    #>
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory)]
+        [string]$Message
+    )
+
+    $text = Get-TransientNetworkFault -Message $Message
+    if (-not $text) {
+        $text = $Message
+        if ($text.Length -gt 120) {
+            $text = $text.Substring(0, 120) + '...'
+        }
+    }
+    return $text
+}
+
 function Update-AllModules {
     [CmdletBinding(SupportsShouldProcess)]
     param()
@@ -1279,12 +1414,30 @@ function Update-AllModules {
     # Query PSGallery for latest versions (bulk request). Pinned modules stay in this query
     # even though they will not be updated — it is the same single call either way, and it
     # lets the log report which release a pin is holding back.
-    try {
-        $gallery = Find-PSResource -Name $installed.Name -Repository PSGallery -ErrorAction SilentlyContinue
-    }
-    catch {
-        Write-Log "Failed to query PSGallery: $_" -Level ERROR
-        return
+    $lookup = Find-GalleryModules -Name $installed.Name
+    $gallery = $lookup.Resources
+    $uncheckedCount = $lookup.Unchecked.Count
+
+    if ($uncheckedCount -gt 0) {
+        $installedCount = $installed.Count
+        $lookupDetail = $lookup.Detail
+
+        $script:Summary.ModulesUnchecked = $uncheckedCount
+        $script:Summary.GalleryFault = $lookup.Fault
+        $script:Summary.ModulesChecked = $installedCount - $uncheckedCount
+
+        if ($uncheckedCount -ge $installedCount) {
+            Write-Log "Could not reach PSGallery, so none of the $installedCount installed modules were checked for updates: $lookupDetail" -Level ERROR
+            return
+        }
+
+        # Name the modules, but not all of them if the list is long
+        $shown = @($lookup.Unchecked | Select-Object -First 10)
+        $nameList = $shown -join ', '
+        if ($uncheckedCount -gt $shown.Count) {
+            $nameList += ", and $($uncheckedCount - $shown.Count) more"
+        }
+        Write-Log "Could not check $uncheckedCount of $installedCount modules for updates ($nameList): $lookupDetail" -Level ERROR
     }
 
     # Report what each pin is holding back, then drop pinned modules from the update flow
@@ -1329,7 +1482,14 @@ function Update-AllModules {
     }
 
     if ($needsUpdate.Count -eq 0) {
-        Write-Log "All modules are up to date"
+        if ($uncheckedCount -gt 0) {
+            # Not "all": some modules never got an answer from the gallery
+            $checkedCount = $script:Summary.ModulesChecked
+            Write-Log "No updates found for the $checkedCount modules that could be checked"
+        }
+        else {
+            Write-Log "All modules are up to date"
+        }
         return
     }
 
@@ -1621,10 +1781,11 @@ try {
 
     Write-Log "======================================================"
     if ($failureCount -gt 0) {
+        $lookupsFailed = $script:Summary.ModulesUnchecked
         $updatesFailed = $script:Summary.ModulesFailed.Count
         $pinsFailed = $script:Summary.PinsFailed.Count
         $prunesFailed = $script:Summary.PrunesFailed.Count
-        Write-Log "PSModuleMaintenance completed with $failureCount unsuccessful operation(s) (updates: $updatesFailed, pins: $pinsFailed, prunes: $prunesFailed)" -Level WARN
+        Write-Log "PSModuleMaintenance completed with $failureCount unsuccessful operation(s) (lookups: $lookupsFailed, updates: $updatesFailed, pins: $pinsFailed, prunes: $prunesFailed)" -Level WARN
     }
     else {
         Write-Log "PSModuleMaintenance completed successfully" -Level SUCCESS
