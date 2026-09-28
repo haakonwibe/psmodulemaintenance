@@ -261,6 +261,25 @@ function Save-Summary {
     Write-Log "Summary saved to: $script:SummaryFile"
 }
 
+function Get-SummaryFailureCount {
+    <#
+    .SYNOPSIS
+        Number of operations that did not succeed this run. This is the one definition of
+        "the run had failures", shared by the closing log line, the toast and the
+        Healthchecks ping so the three cannot disagree.
+    #>
+    [CmdletBinding()]
+    [OutputType([int])]
+    param(
+        [Parameter(Mandatory)]
+        [hashtable]$Summary
+    )
+
+    return $Summary.ModulesFailed.Count +
+           $Summary.PrunesFailed.Count +
+           $Summary.PinsFailed.Count
+}
+
 function Remove-OldLogs {
     [CmdletBinding()]
     param(
@@ -325,9 +344,7 @@ function Send-ToastNotification {
             $parts += $pruneText
         }
 
-        $hasFailures = ($Summary.ModulesFailed.Count -gt 0) -or
-                       ($Summary.PrunesFailed.Count -gt 0) -or
-                       ($Summary.PinsFailed.Count -gt 0)
+        $hasFailures = (Get-SummaryFailureCount -Summary $Summary) -gt 0
 
         $message = ($parts -join '. ') + '.'
         if (-not $hasFailures) {
@@ -1021,6 +1038,126 @@ function Invoke-ModuleUpdate {
     }
 }
 
+function Get-TransientNetworkFault {
+    <#
+    .SYNOPSIS
+        Returns the part of an error message that marks it as a passing network fault
+        (dropped TLS handshake, DNS not ready yet, gateway 5xx), or $null when the failure
+        is about the module itself and trying again would not help.
+
+    .NOTES
+        Matches on message text because there is nothing else left to match on. A failure
+        inside the isolated runspace reaches the caller as MethodInvocationException ->
+        ActionPreferenceStopException with no InnerException below that: PSResourceGet has
+        already flattened the HttpRequestException/SocketException chain into one string.
+        Measured against a dead proxy and an unresolvable host, not assumed.
+    #>
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory)]
+        [AllowEmptyString()]
+        [string]$Message
+    )
+
+    $patterns = @(
+        'SSL connection could not be established'
+        'Unable to (read|write) data (from|to) the transport connection'
+        'forcibly closed by the remote host'
+        'connection was (closed|aborted)'
+        'response ended prematurely'
+        'No such host is known'
+        'remote name could not be resolved'
+        'connected party did not properly respond'
+        'actively refused'
+        'unreachable (network|host)'
+        'HttpClient\.Timeout'
+        'error occurred while sending the request'
+        'status code does not indicate success: (429|502|503|504)'
+    )
+
+    $fault = $null
+    if ($Message -match ($patterns -join '|')) {
+        $fault = $Matches[0]
+    }
+    return $fault
+}
+
+function Invoke-ModuleUpdateWithRetry {
+    <#
+    .SYNOPSIS
+        Invoke-ModuleUpdate, tried again when the failure is a passing network fault.
+        Takes the same parameters and throws the same errors, so callers keep their
+        existing catch blocks.
+
+    .NOTES
+        On 2026-09-27 both pending updates failed 2s apart with "The SSL connection could
+        not be established". The task had fired seconds after the machine left Modern
+        Standby and joined a phone hotspot. The same call succeeded later that day, but
+        with no retry each module had to wait a week for the next run.
+
+        Not retried:
+        - Timeouts. The module already used its whole ModuleUpdateTimeoutSeconds, and
+          trying again would multiply the runtime the timeout exists to bound.
+        - Anything that is not network-shaped, including the locked-folder failures that
+          Update-AllModules recovers from by itself.
+
+        Each attempt gets a fresh runspace from Invoke-ModuleUpdate, so nothing carries
+        over from the one that failed.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$Name,
+
+        [string]$Scope,
+
+        [bool]$TrustRepository = $true,
+
+        [int]$TimeoutSeconds = 600,
+
+        [string]$Version,
+
+        [switch]$Prerelease,
+
+        # Seconds to wait before each retry. One entry per retry, so two entries means
+        # three attempts in total
+        [int[]]$RetryDelaySeconds = @(5, 15)
+    )
+
+    $updateParams = [hashtable]::new($PSBoundParameters)
+    $updateParams.Remove('RetryDelaySeconds')
+
+    $maxAttempts = $RetryDelaySeconds.Count + 1
+
+    for ($attempt = 1; $attempt -le $maxAttempts; $attempt++) {
+        $failure = $null
+        try {
+            Invoke-ModuleUpdate @updateParams
+        }
+        catch {
+            $failure = $_
+        }
+
+        if (-not $failure) {
+            return
+        }
+
+        $fault = $null
+        if ($failure.Exception -isnot [System.TimeoutException]) {
+            $fault = Get-TransientNetworkFault -Message $failure.Exception.Message
+        }
+
+        if ((-not $fault) -or ($attempt -ge $maxAttempts)) {
+            throw $failure
+        }
+
+        $delay = $RetryDelaySeconds[$attempt - 1]
+        Write-Log "Network fault on $Name (attempt $attempt of $maxAttempts): $fault. Retrying in ${delay}s" -Level WARN
+        Start-Sleep -Seconds $delay
+    }
+}
+
 function Set-PinnedModuleVersions {
     <#
     .SYNOPSIS
@@ -1068,7 +1205,7 @@ function Set-PinnedModuleVersions {
 
                 $pinTimer = [System.Diagnostics.Stopwatch]::StartNew()
 
-                Invoke-ModuleUpdate -Name $name -Scope $Scope `
+                Invoke-ModuleUpdateWithRetry -Name $name -Scope $Scope `
                     -TrustRepository $script:Config.TrustPSGallery -TimeoutSeconds $timeout `
                     -Version $pin.Requested -Prerelease:([bool]$pin.Prerelease)
 
@@ -1211,7 +1348,7 @@ function Update-AllModules {
 
                 $moduleTimer = [System.Diagnostics.Stopwatch]::StartNew()
 
-                Invoke-ModuleUpdate -Name $module.Name -Scope $scope `
+                Invoke-ModuleUpdateWithRetry -Name $module.Name -Scope $scope `
                     -TrustRepository $script:Config.TrustPSGallery -TimeoutSeconds $timeout
 
                 $script:Summary.ModulesUpdated++
@@ -1248,7 +1385,7 @@ function Update-AllModules {
                 if (-not (Remove-LockedModuleFolder -FolderPath $lockedPath)) { break }
 
                 try {
-                    Invoke-ModuleUpdate -Name $module.Name -Scope $scope `
+                    Invoke-ModuleUpdateWithRetry -Name $module.Name -Scope $scope `
                         -TrustRepository $script:Config.TrustPSGallery -TimeoutSeconds $timeout
                     $script:Summary.ModulesUpdated++
                     Write-Log "Updated (after $attempt force-removal(s)): $($module.Name) (took $([math]::Round($moduleTimer.Elapsed.TotalSeconds))s)" -Level SUCCESS
@@ -1477,8 +1614,21 @@ try {
         Save-Summary -BasePath $LogPath
     }
 
+    # The closing line has to agree with the toast and the ping. It used to claim success
+    # unconditionally, which on 2026-09-27 put "completed successfully" directly above a
+    # Fail ping for a run where both updates had been unsuccessful
+    $failureCount = Get-SummaryFailureCount -Summary $script:Summary
+
     Write-Log "======================================================"
-    Write-Log "PSModuleMaintenance completed successfully" -Level SUCCESS
+    if ($failureCount -gt 0) {
+        $updatesFailed = $script:Summary.ModulesFailed.Count
+        $pinsFailed = $script:Summary.PinsFailed.Count
+        $prunesFailed = $script:Summary.PrunesFailed.Count
+        Write-Log "PSModuleMaintenance completed with $failureCount unsuccessful operation(s) (updates: $updatesFailed, pins: $pinsFailed, prunes: $prunesFailed)" -Level WARN
+    }
+    else {
+        Write-Log "PSModuleMaintenance completed successfully" -Level SUCCESS
+    }
     Write-Log "======================================================"
 }
 catch {
@@ -1493,9 +1643,7 @@ finally {
 
     # Send toast notification based on config
     $notifyMode = $script:Config.NotificationMode
-    $hasFailures = ($script:Summary.ModulesFailed.Count -gt 0) -or
-                   ($script:Summary.PrunesFailed.Count -gt 0) -or
-                   ($script:Summary.PinsFailed.Count -gt 0)
+    $hasFailures = (Get-SummaryFailureCount -Summary $script:Summary) -gt 0
 
     if ($notifyMode -eq 'Always' -or ($notifyMode -eq 'OnFailure' -and $hasFailures)) {
         Send-ToastNotification -Summary $script:Summary -SkippedUpdates:$PruneOnly -SkippedPruning:$UpdateOnly

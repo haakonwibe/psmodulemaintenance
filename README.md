@@ -13,6 +13,7 @@ Automated PowerShell module maintenance for Windows. Updates all PSResourceGet-m
 - ⏰ **Scheduled Execution** — Runs weekly via Windows Task Scheduler
 - 🔔 **Toast Notifications** — Optional Windows toast notifications after each run
 - 🛡️ **Per-Module Timeout** — Each module update runs in an isolated runspace with a configurable timeout, preventing one slow module from blocking the entire run
+- 🔁 **Retry on Network Faults** — A dropped connection or gateway hiccup is retried (up to three attempts) instead of costing the module a week
 - 📡 **Healthchecks.io Monitoring** — Optional dead-man's switch that alerts when a scheduled run never happens, not just when one fails
 
 ## Requirements
@@ -375,7 +376,7 @@ If you skip migration, the weekly maintenance script will still work (it detects
 3. **Resolve Monitoring Secret** — Reads the Healthchecks ping URL from the vault and sends a start ping. Done before any module work, because the script prunes `SecretManagement` itself
 4. **Self-Check** — Warns if the scheduled task launches a hard-coded interpreter path that a PowerShell reinstall would break
 5. **Clean Old Logs** — Removes logs older than retention period
-6. **Update Modules** — Bulk checks PSGallery for available updates, then updates each module in an isolated runspace with a per-module timeout (targets AllUsers scope when OneDrive is detected)
+6. **Update Modules** — Bulk checks PSGallery for available updates, then updates each module in an isolated runspace with a per-module timeout (targets AllUsers scope when OneDrive is detected). Transient network faults are retried; timeouts are not
 7. **Prune Versions** — Groups modules by name, keeps newest, removes the rest (skips built-in modules like PackageManagement). When OneDrive is detected and modules are found in the CurrentUser path, logs a warning to run `Invoke-OneDriveMigration.ps1`
 8. **Save Summary** — Writes JSON summary after each phase (incremental saves protect against process termination)
 9. **Toast Notification** — Shows a Windows toast with the run summary (if enabled via `NotificationMode`)
@@ -436,6 +437,27 @@ Check the log files for specific errors. Common causes:
 - Module removed from PSGallery
 - Dependency conflicts
 - Network/proxy issues
+
+#### Network faults
+
+A passing network fault — a dropped TLS handshake, DNS not ready after wake, a gateway
+502/503/504 — is retried automatically. Each module gets up to three attempts, waiting 5
+seconds and then 15 seconds in between:
+
+```
+[WARN] Network fault on Microsoft.WinGet.Client (attempt 1 of 3): SSL connection could not be established. Retrying in 5s
+[SUCCESS] Updated: Microsoft.WinGet.Client (took 9s)
+```
+
+A module that succeeds on a later attempt counts as a normal success. Only a module that
+fails all three attempts is reported as unsuccessful, and the run then ends with:
+
+```
+[WARN] PSModuleMaintenance completed with 1 unsuccessful operation(s) (updates: 1, pins: 0, prunes: 0)
+```
+
+This matters most on laptops: the task uses `StartWhenAvailable`, so a missed 03:00 run
+fires the moment the machine wakes, often before the network has settled.
 
 ### Module update timed out
 
