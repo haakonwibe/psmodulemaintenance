@@ -46,7 +46,9 @@ monitoring is opt-in and never becomes a surprise dependency.
 
 ## Secret Handling
 
-`config.json` is tracked in git and pushed to GitHub, so the ping URL cannot live there.
+`config.json` was tracked in git and pushed to GitHub when this was designed, so the ping
+URL could not live there. It has since been taken out of the repository, but it is still a
+plain-text file, and the reasoning holds.
 A Healthchecks ping URL is a bearer secret: anyone holding it can send fake success pings
 and suppress real alerts.
 

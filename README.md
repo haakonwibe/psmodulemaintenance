@@ -33,7 +33,14 @@ cd PSModuleMaintenance
 
 ### 2. Configure (Optional)
 
-Edit `config.json` to exclude or pin specific modules:
+Without a `config.json` the script runs on its built-in defaults. To change a setting,
+copy the template and edit the copy:
+
+```powershell
+Copy-Item .\config.example.json .\config.json
+```
+
+For example, to exclude or pin specific modules:
 
 ```json
 {
@@ -48,13 +55,20 @@ Edit `config.json` to exclude or pin specific modules:
   "NotificationMode": "Always",
   "ModuleUpdateTimeoutSeconds": 600,
   "Healthchecks": {
-    "Enabled": true,
+    "Enabled": false,
     "SecretName": "PSModuleMaintenance-Healthchecks",
     "SecretVault": "SecretStore",
     "TimeoutSeconds": 10
   }
 }
 ```
+
+`config.json` is ignored by git, so your settings stay on your machine and a `git pull`
+never touches them.
+
+> **Upgrading from a version where `config.json` was part of the repository:** copy your
+> `config.json` somewhere safe before you pull, and copy it back afterwards. Git removes the
+> file from the folder when it stops being tracked.
 
 ### 3. OneDrive Check
 
@@ -131,7 +145,7 @@ Run the maintenance script directly:
 | `SecretVault` | string | `"SecretStore"` | SecretManagement vault to read from |
 | `TimeoutSeconds` | int | `10` | HTTP timeout per ping attempt (retried twice) |
 
-**The ping URL is never stored in `config.json`** — it is a bearer secret, and `config.json` is tracked in git.
+**The ping URL is never stored in `config.json`** — it is a bearer secret, and a plain-text settings file is too easily copied, synced or shared.
 
 ## Version Pinning
 
@@ -195,7 +209,7 @@ Healthchecks.io monitoring closes that gap with a dead-man's switch: the alert f
 
 Store the full ping URL in the SecretManagement vault. It is a bearer secret — anyone
 holding it can send fake success pings and suppress your real alerts — so it stays out of
-the git-tracked `config.json`:
+`config.json`:
 
 ```powershell
 Set-Secret -Name PSModuleMaintenance-Healthchecks `
@@ -391,7 +405,7 @@ nothing to configure. The weekly log notes them without raising a warning:
 
 ## How It Works
 
-1. **Load Configuration** — Reads `config.json` for exclusions and settings
+1. **Load Configuration** — Reads `config.json` for exclusions and settings, or uses the built-in defaults if there is none
 2. **Initialize Logging** — Creates timestamped log files and starts transcript
 3. **Resolve Monitoring Secret** — Reads the Healthchecks ping URL from the vault and sends a start ping. Done before any module work, because the script prunes `SecretManagement` itself
 4. **Self-Check** — Warns if the scheduled task launches a hard-coded interpreter path that a PowerShell reinstall would break
@@ -552,6 +566,7 @@ stand in only for the calls that would touch the network or the machine.
 | `Test-Retry.ps1` | Which errors count as a network fault, and how an update is retried |
 | `Test-GalleryLookup.ps1` | The PSGallery lookup, and how an incomplete one is reported in the log, the toast and the ping |
 | `Test-ModuleOwnership.ps1` | Telling modules installed by PSResourceGet from another program's, and finding a version on disk |
+| `Test-Config.ps1` | That `config.example.json` is valid, matches the built-in defaults, and that a missing `config.json` is fine |
 
 ## Contributing
 

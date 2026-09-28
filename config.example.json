@@ -1,17 +1,13 @@
 {
   "$schema": "./config.schema.json",
-  "_comment": "Configuration for PSModuleMaintenance",
-  
-  "ExcludedModules": [
+  "_comment": "Copy this file to config.json and edit the copy. config.json is ignored by git.",
 
-  ],
+  "ExcludedModules": [],
 
-  "PinnedModules": {
-
-  },
+  "PinnedModules": {},
 
   "LogRetentionDays": 180,
-  
+
   "TrustPSGallery": true,
 
   "NotificationMode": "Always",
@@ -19,7 +15,7 @@
   "ModuleUpdateTimeoutSeconds": 600,
 
   "Healthchecks": {
-    "Enabled": true,
+    "Enabled": false,
     "SecretName": "PSModuleMaintenance-Healthchecks",
     "SecretVault": "SecretStore",
     "TimeoutSeconds": 10

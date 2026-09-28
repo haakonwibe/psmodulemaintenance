@@ -20,7 +20,7 @@
 
 .PARAMETER HealthchecksUrl
     Full Healthchecks.io ping URL (e.g. https://hc-ping.com/<uuid>). Stored in the
-    SecretManagement vault rather than config.json, which is tracked in git. Optional —
+    SecretManagement vault rather than in config.json, which is plain text. Optional —
     omit it to leave any existing secret untouched.
 
 .PARAMETER Uninstall
@@ -185,7 +185,7 @@ function Set-HealthchecksSecret {
         vault can actually be read from a non-interactive scheduled task.
 
         The ping URL is a bearer secret — anyone holding it can send fake success pings
-        and suppress real alerts — so it stays out of the git-tracked config.json.
+        and suppress real alerts — so it stays out of config.json.
     #>
     param(
         [string]$Url,
