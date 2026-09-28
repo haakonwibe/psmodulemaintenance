@@ -174,6 +174,7 @@ try {
     Assert-That ($script:ProtectedModules.ContainsKey('Contoso.Tools')) 'a pin that is not a version: the module is protected'
     Assert-That (-not $script:Config.PinnedModules.ContainsKey('Contoso.Tools')) 'and not pinned to anything'
     Assert-That ($script:Config.PinnedModules.ContainsKey('Fabrikam.Core')) 'the pin next to it still holds'
+    Assert-That ((@($script:ProtectedModules['Contoso.Tools']) -join ' ') -like '*PinnedModules: ''2.`*'' is not an exact version such as 2.19.0*') 'the reason names the setting and the value, and shows what a pin looks like'
 
     Import-TestConfig '{ "PinnedModules": { "Contoso.Tools": 2.10 } }'
     Assert-That ($script:ProtectedModules.ContainsKey('Contoso.Tools')) 'a pin written as a number: the module is protected, 2.10 would have arrived as 2.1'

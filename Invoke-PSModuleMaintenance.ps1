@@ -135,7 +135,7 @@ function ConvertTo-PinnedModuleTable {
         else {
             $parsed = ConvertFrom-PinnedVersionString $entry.Value
             if (-not $parsed) {
-                $problem = "'$($entry.Value)' is not a valid version"
+                $problem = "'$($entry.Value)' is not an exact version such as 2.19.0"
             }
         }
 
@@ -2354,7 +2354,14 @@ function Update-AllModules {
     $script:Summary.ModulesChecked = $installed.Count
     $script:Summary.ExcludedModules = @($script:Config.ExcludedModules)
 
-    Write-Log "Found $($installed.Count) installed modules (excluding: $($script:Config.ExcludedModules -join ', '))"
+    # A module left alone because of a config entry is missing from the count as well,
+    # so the line names it. Without one the line reads as it always has
+    $foundLine = "Found $($installed.Count) installed modules (excluding: $($script:Config.ExcludedModules -join ', ')"
+    if ($script:ProtectedModules.Count -gt 0) {
+        $leftAlone = @($script:ProtectedModules.Keys | Sort-Object) -join ', '
+        $foundLine += "; left alone, entry not understood: $leftAlone"
+    }
+    Write-Log "$foundLine)"
 
     # Pinned modules are held at a specific version — enforce those before updating anything
     $scope = if ($useAllUsersScope) { 'AllUsers' } else { $null }

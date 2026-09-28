@@ -395,7 +395,7 @@ $protected = New-Summary
 $protected.ModulesUpdated = 2
 $protected.VersionsPruned = 1
 $protected.ProtectedModules += @{ Module = 'Contoso.Tools'; Problem = "KeepVersions: '5.x' is not a version prefix such as 5 or 5.7" }
-$protected.ProtectedModules += @{ Module = 'Fabrikam.Core'; Problem = "PinnedModules: 'latest' is not a valid version" }
+$protected.ProtectedModules += @{ Module = 'Fabrikam.Core'; Problem = "PinnedModules: 'latest' is not an exact version such as 2.19.0" }
 $f = Get-SummaryFailures -Summary $protected
 Assert-That (($f.Config -eq 1) -and ($f.Total -eq 1)) "two modules left alone are one failure, it is the config that needs putting right (total $($f.Total))"
 

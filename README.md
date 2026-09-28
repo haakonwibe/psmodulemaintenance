@@ -196,6 +196,7 @@ entry was most likely there to keep.
 
 ```
 [ERROR] Contoso.Tools is left alone in this run, not updated and not pruned. A config entry for it is not understood (KeepVersions: '5.x' is not a version prefix such as 5 or 5.7)
+[INFO] Found 78 installed modules (excluding: Az.Accounts; left alone, entry not understood: Contoso.Tools)
 [WARN] PSModuleMaintenance completed with 1 unsuccessful operation(s) (config: 1, lookups: 0, updates: 0, pins: 0, prunes: 0)
 ```
 

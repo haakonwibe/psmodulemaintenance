@@ -288,7 +288,7 @@ try {
     Assert-That (($removed -join '; ') -eq 'Uninstall-PSResource Fabrikam.Core 1.0.0') "the module the entry was about keeps all its versions, the others are pruned as usual: $($removed -join '; ')"
     Assert-That ($run.Log -contains "[ERROR] Contoso.Tools is left alone in this run, not updated and not pruned. A config entry for it is not understood (KeepVersions: '5.x' is not a version prefix such as 5 or 5.7)") 'the log says which module, and what is wrong with the entry'
     Assert-That ($run.Log -contains '[INFO]   - Modules left alone, entry not understood: 1') 'it is counted in the configuration that was loaded'
-    Assert-That ($run.Log -contains '[INFO] Found 2 installed modules (excluding: )') 'and is not among the modules that are looked at'
+    Assert-That ($run.Log -contains '[INFO] Found 2 installed modules (excluding: ; left alone, entry not understood: Contoso.Tools)') 'it is not among the modules that are looked at, and the count says why it is one short'
     Assert-That ($run.Log -contains '[WARN] PSModuleMaintenance completed with 1 unsuccessful operation(s) (config: 1, lookups: 0, updates: 0, pins: 0, prunes: 0)') 'the run does not end as a success'
     Assert-That ($run.Log -contains '[INFO] Toast notification sent: Updated 0 modules. Pruned 1 versions. 1 module(s) left alone, check config.json.') 'the toast points at the config'
     Assert-That ($run.Calls -contains 'ping https://hc.invalid/ping/made-up/fail') 'a fail ping is sent'
