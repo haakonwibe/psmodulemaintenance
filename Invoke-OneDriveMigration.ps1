@@ -328,6 +328,10 @@ $copyFailures = @()
 # Modules another program installed. They are neither copied nor cleaned up
 $leftInPlace = @()
 
+# Versions a dry run would have copied, as "module\version". Under -WhatIf nothing reaches
+# AllUsers, so the cleanup cannot go by what is on disk and goes by this list
+$wouldCopy = @()
+
 foreach ($moduleFolder in $moduleFolders) {
     $versionFolders = Get-ChildItem -Path $moduleFolder.FullName -Directory -ErrorAction SilentlyContinue |
         Where-Object { $_.Name -match '^\d+(\.\d+){1,3}$' }
@@ -391,6 +395,9 @@ foreach ($moduleFolder in $moduleFolders) {
                 $copyFailures += "$($moduleFolder.Name) v$($versionFolder.Name): $($_.Exception.Message)"
             }
         }
+        elseif ($WhatIfPreference) {
+            $wouldCopy += "$($moduleFolder.Name)\$($versionFolder.Name)"
+        }
     }
 }
 
@@ -400,6 +407,9 @@ Write-Log "Copy phase complete. Copied: $copiedCount, Unsuccessful: $($copyFailu
 # Set here, not inside the cleanup, so the summary has a number whichever way this goes
 $removedCount = 0
 $removeFailures = @()
+
+# OneDrive copies that were kept because AllUsers has no copy of that version
+$notMigrated = @()
 
 # What there is to clean up is worked out once, and the log then says one thing. It used
 # to say "nothing to clean up" and go on to "Cleaning up OneDrive copies" all the same.
@@ -441,6 +451,18 @@ else {
             $moduleName = $moduleFolder.Name
             $versionName = $versionFolder.Name
 
+            # Only delete what is safely in AllUsers. A copy that did not succeed used to be
+            # followed by the removal of the original, which lost the module altogether
+            $destination = Join-Path $allUsersPath "$moduleName\$versionName"
+            $isInAllUsers = Test-Path -LiteralPath $destination
+            $isPlanned = $WhatIfPreference -and ("$moduleName\$versionName" -in $wouldCopy)
+
+            if ((-not $isInAllUsers) -and (-not $isPlanned)) {
+                Write-Log "Keeping the OneDrive copy of $moduleName v${versionName}: it is not in AllUsers" -Level WARN
+                $notMigrated += "$moduleName v$versionName"
+                continue
+            }
+
             if ($PSCmdlet.ShouldProcess("$moduleName v$versionName (OneDrive copy)", "Remove migrated copy")) {
                 Write-Log "Removing OneDrive copy: $moduleName v$versionName"
 
@@ -474,8 +496,18 @@ else {
 }
 
 # --- Summary ---
+# What did not make it across: a copy that did not succeed, or an original that was kept
+# because AllUsers has no copy of it. The same version can be in both lists
+$failedCopies = @($copyFailures | ForEach-Object { ($_ -split ': ', 2)[0] })
+$unresolved = @(($failedCopies + $notMigrated) | Sort-Object -Unique)
+
 Write-Log "======================================================"
-Write-Log "OneDrive Module Migration completed" -Level SUCCESS
+if ($unresolved.Count -gt 0) {
+    Write-Log "OneDrive Module Migration completed with $($unresolved.Count) module version(s) not migrated" -Level WARN
+}
+else {
+    Write-Log "OneDrive Module Migration completed" -Level SUCCESS
+}
 Write-Log "======================================================"
 Write-Log "  Modules copied to AllUsers: $copiedCount"
 if ($leftInPlace.Count -gt 0) {
@@ -485,6 +517,9 @@ if (-not $SkipCleanup) {
     Write-Log "  OneDrive copies removed: $removedCount"
     if ($removeFailures.Count -gt 0) {
         Write-Log "  Failed to remove: $($removeFailures.Count) (may be scheduled for reboot deletion)" -Level WARN
+    }
+    if ($notMigrated.Count -gt 0) {
+        Write-Log "  Kept in OneDrive, not in AllUsers: $($notMigrated -join ', ')" -Level WARN
     }
 }
 if ($copyFailures.Count -gt 0) {

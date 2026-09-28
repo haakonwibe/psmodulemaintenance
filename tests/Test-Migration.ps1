@@ -196,6 +196,41 @@ if ((-not `$allUsersPath.StartsWith('$root')) -or (-not `$currentUserModulePath.
 
     $calmLines = @($log | Where-Object { ($_ -like '`[INFO`]*') -or ($_ -like '`[SUCCESS`]*') })
     Assert-That (@($calmLines | Where-Object { $_ -match '(?i)error|fail|warn' }).Count -eq 0) 'no INFO or SUCCESS line holds a word that would colour it as a problem'
+
+    # --- A copy that does not succeed ------------------------------------------------
+    Write-Section 'A copy that does not succeed'
+
+    # A file sits where the module folder would have to be created, so the copy cannot
+    # succeed. The original used to be removed all the same, and the module was gone
+    Set-Content -Path (Join-Path $fakeAllUsers 'Contoso.Broken') -Value 'in the way'
+    New-FakeModule -Name 'Contoso.Broken' -Version '1.0.0' -Managed
+    New-FakeModule -Name 'Contoso.Fine' -Version '2.0.0' -Managed
+
+    $log = Invoke-MigrationCopy
+    Assert-That (@($log | Where-Object { $_ -like '`[ERROR`] Failed to copy Contoso.Broken v1.0.0:*' }).Count -eq 1) 'the copy that did not succeed is an ERROR'
+    Assert-That (Test-Path (Join-Path $fakeUserModules 'Contoso.Broken\1.0.0\Contoso.Broken.psd1')) 'and its original is still there'
+    Assert-That ($log -contains '[WARN] Keeping the OneDrive copy of Contoso.Broken v1.0.0: it is not in AllUsers') 'the log says it was kept, and why'
+    Assert-That (Test-Path (Join-Path $fakeAllUsers 'Contoso.Fine\2.0.0')) 'the module next to it is copied'
+    Assert-That (-not (Test-Path (Join-Path $fakeUserModules 'Contoso.Fine'))) 'and cleaned up as usual'
+    Assert-That ($log -contains '[WARN] OneDrive Module Migration completed with 1 module version(s) not migrated') 'the run does not end as a success'
+    Assert-That (@($log | Where-Object { $_ -like '`[SUCCESS`] OneDrive Module Migration completed*' }).Count -eq 0) 'not even in part'
+    Assert-That ($log -contains '[WARN]   Kept in OneDrive, not in AllUsers: Contoso.Broken v1.0.0') 'the summary names what was kept'
+
+    # Once the obstacle is gone, a second run finishes the job
+    Remove-Item -LiteralPath (Join-Path $fakeAllUsers 'Contoso.Broken') -Force
+    $log = Invoke-MigrationCopy
+    Assert-That (Test-Path (Join-Path $fakeAllUsers 'Contoso.Broken\1.0.0\Contoso.Broken.psd1')) 'a later run copies it'
+    Assert-That (-not (Test-Path (Join-Path $fakeUserModules 'Contoso.Broken'))) 'and only then removes the original'
+    Assert-That ($log -contains '[SUCCESS] OneDrive Module Migration completed') 'and ends as a success'
+
+    # --- A dry run must not mistake "not copied yet" for "could not be copied" ----------
+    Write-Section 'A dry run of a first migration'
+
+    New-FakeModule -Name 'Contoso.Later' -Version '4.0.0' -Managed
+    $log = Invoke-MigrationCopy -Arguments '-WhatIf'
+    Assert-That (Test-Path (Join-Path $fakeUserModules 'Contoso.Later\4.0.0')) 'nothing is removed'
+    Assert-That (@($log | Where-Object { $_ -like '*Keeping the OneDrive copy*' }).Count -eq 0) 'and nothing is reported as kept: it would have been copied first'
+    Assert-That ($log -contains '[SUCCESS] OneDrive Module Migration completed') 'the dry run ends as a success'
 }
 finally {
     if (Test-Path -LiteralPath $root) {

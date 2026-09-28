@@ -492,6 +492,14 @@ After migration, the weekly maintenance script (`Invoke-PSModuleMaintenance.ps1`
 
 The migration is **idempotent and gradual** — modules that already exist at the destination are skipped, and OneDrive copies that can't be removed are either force-deleted or scheduled for reboot deletion.
 
+**An original is only removed once its copy is in place.** If a version could not be copied, its OneDrive copy is kept, the log says so, and the run ends with a warning instead of a success. Run the migration again once the cause is out of the way:
+
+```
+[ERROR] Failed to copy Contoso.Tools v1.0.0: <reason>
+[WARN] Keeping the OneDrive copy of Contoso.Tools v1.0.0: it is not in AllUsers
+[WARN] OneDrive Module Migration completed with 1 module version(s) not migrated
+```
+
 If you skip migration, the weekly maintenance script will still work (it detects OneDrive and targets AllUsers scope automatically), but any modules left in the OneDrive path will trigger a warning in the logs: `Found N module(s) in OneDrive path — run Invoke-OneDriveMigration.ps1 to migrate them`.
 
 #### Modules that belong to another program
@@ -690,7 +698,7 @@ script starts.
 | `Test-Config.ps1` | That `config.example.json` is valid, matches the built-in defaults, and that a missing `config.json` is fine. Loading `KeepVersions`, and telling a file that cannot be read from one with a bad entry |
 | `Test-ConfigFault.ps1` | A config file that cannot be read: the whole script is run and must touch no module, keep its logs, show a toast and send a fail ping |
 | `Test-KeepVersions.ps1` | Version lines: what a selector covers, what is kept and what is pruned, which lines are updated and to what |
-| `Test-Migration.ps1` | The OneDrive migration, run as a whole against a made-up folder tree: what is copied, what is left in place, what is cleaned up, and what the log says |
+| `Test-Migration.ps1` | The OneDrive migration, run as a whole against a made-up folder tree: what is copied, what is left in place, what is cleaned up, what happens when a copy does not succeed, and what the log says |
 
 ## Contributing
 
