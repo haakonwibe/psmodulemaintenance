@@ -533,9 +533,31 @@ Most OneDrive cleanup completes at stage 2. Stage 4 is the nuclear option for tr
 
 OneDrive may warn about mass deletions when cleaning up migrated module copies. This is expected — the modules have already been copied to AllUsers scope. Click "Delete" to allow OneDrive to sync the removal.
 
+## Tests
+
+```powershell
+.\tests\Invoke-Tests.ps1            # a few seconds
+.\tests\Invoke-Tests.ps1 -Detailed  # show every check
+```
+
+The tests need no network and no elevation. They install nothing, send no notification and
+no ping, and only write to a temp folder that they remove again.
+
+They cover the parts a normal run almost never reaches: what happens when the network
+drops, when PSGallery cannot be reached, and when a module belongs to another program.
+They run the real functions, lifted out of the scripts through the PowerShell parser, and
+stand in only for the calls that would touch the network or the machine.
+
+| File | Covers |
+|------|--------|
+| `Test-Retry.ps1` | Which errors count as a network fault, and how an update is retried |
+| `Test-GalleryLookup.ps1` | The PSGallery lookup, and how an incomplete one is reported in the log, the toast and the ping |
+| `Test-ModuleOwnership.ps1` | Telling modules installed by PSResourceGet from another program's, and finding a version on disk |
+
 ## Contributing
 
-Issues and PRs welcome! Please include log output when reporting bugs.
+Issues and PRs welcome! Please include log output when reporting bugs, and run the tests
+before opening a PR.
 
 ## License
 

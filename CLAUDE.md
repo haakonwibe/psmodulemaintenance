@@ -35,7 +35,20 @@ PSModuleMaintenance is a Windows-based automation tool that keeps PowerShell mod
 
 # Uninstall scheduled task
 .\Install-ModuleMaintenance.ps1 -Uninstall
+
+# Run the tests (a few seconds, no network, no elevation)
+.\tests\Invoke-Tests.ps1
 ```
+
+## Tests
+
+`tests\Invoke-Tests.ps1` runs every `tests\Test-*.ps1`, each in a process of its own. Run it after changing either script.
+
+- **They run the real code.** `Get-ScriptFunctionText` in `TestHelpers.ps1` lifts a function out of a script through the PowerShell parser, so the script never has to run. A test stands in only for what would touch the network or the machine (`Invoke-ModuleUpdate`, `Find-PSResource`, `Write-Log`, `powershell.exe`)
+- **They are plain scripts, not Pester.** Deliberate: no dependency on a module this tool itself updates. Do not name a file `*.Tests.ps1`, or Pester will try to discover it
+- **They cover the fault paths**, which a normal run almost never reaches: network faults, an unreachable gallery, a module owned by another program. A healthy weekly run proves nothing about these, so the tests are the only evidence they still work
+- **This is a public repository.** A test must not contain anything from a real machine: no user or machine name, no paths under a user profile, no organisation, no network names, nothing read from the real log folder. Recorded error messages are embedded with the module name replaced (`Contoso.Tools`), and the machine name is fixed to `TEST-HOST` inside the test. The same goes for examples in the docs and for commit messages
+- A new stand-in for `Find-PSResource` must raise errors with the same `-ErrorId` as the real cmdlet (`PackageNotFound`, `HttpRequestCallFailure`), because `Find-GalleryModules` classifies by id
 
 ## Architecture
 
