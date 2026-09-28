@@ -263,27 +263,43 @@ function Save-Summary {
     Write-Log "Summary saved to: $script:SummaryFile"
 }
 
-function Get-SummaryFailureCount {
+function Get-SummaryFailures {
     <#
     .SYNOPSIS
-        Number of operations that did not succeed this run. This is the one definition of
+        What did not succeed this run, by kind and in total. This is the one definition of
         "the run had failures", shared by the closing log line, the toast and the
         Healthchecks ping so the three cannot disagree.
 
-        A module that could not be looked up counts. It was not maintained this run, and
-        leaving it out is how an unreachable gallery used to pass as a clean run.
+    .NOTES
+        The gallery lookup counts once, however many modules it left unchecked. An outage
+        is one thing going wrong, and counting it per module turned a single unreachable
+        gallery into "164 unsuccessful operations". How many modules were affected is
+        still in Summary.ModulesUnchecked and in the log.
+
+        It does have to count, though. Leaving it out is how an unreachable gallery used
+        to pass as a clean run.
     #>
     [CmdletBinding()]
-    [OutputType([int])]
     param(
         [Parameter(Mandatory)]
         [hashtable]$Summary
     )
 
-    return $Summary.ModulesUnchecked +
-           $Summary.ModulesFailed.Count +
-           $Summary.PrunesFailed.Count +
-           $Summary.PinsFailed.Count
+    $lookups = 0
+    if ($Summary.ModulesUnchecked -gt 0) {
+        $lookups = 1
+    }
+    $updates = $Summary.ModulesFailed.Count
+    $pins = $Summary.PinsFailed.Count
+    $prunes = $Summary.PrunesFailed.Count
+
+    return [PSCustomObject]@{
+        Lookups = $lookups
+        Updates = $updates
+        Pins    = $pins
+        Prunes  = $prunes
+        Total   = $lookups + $updates + $pins + $prunes
+    }
 }
 
 function Remove-OldLogs {
@@ -353,7 +369,7 @@ function Send-ToastNotification {
             $parts += $pruneText
         }
 
-        $hasFailures = (Get-SummaryFailureCount -Summary $Summary) -gt 0
+        $hasFailures = (Get-SummaryFailures -Summary $Summary).Total -gt 0
 
         $message = ($parts -join '. ') + '.'
         if (-not $hasFailures) {
@@ -1265,10 +1281,14 @@ function Find-GalleryModules {
             PackageNotFound    answered, the module is simply not on PSGallery
             anything else      not answered (HttpRequestCallFailure for a network fault)
 
-        One known module is looked up before the bulk query. If that fails the bulk query
-        is not sent, which keeps a dead network from costing one failed request per
-        installed module. Unanswered lookups are retried on the same schedule as updates,
-        and only the modules still without an answer are asked about again.
+        One module is looked up before the bulk query, as a probe. If the gallery gives no
+        answer the bulk query is not sent, which keeps a dead network from costing one
+        failed request per installed module. The probe is classified like any other
+        lookup, so "not found" counts as an answer: it proves the gallery is reachable,
+        which is all the probe is for.
+
+        Unanswered lookups are retried on the same schedule as updates, and only the
+        modules still without an answer are asked about again.
     #>
     [CmdletBinding()]
     param(
@@ -1280,7 +1300,9 @@ function Find-GalleryModules {
         [int[]]$RetryDelaySeconds = @(5, 15)
     )
 
-    # Certain to be on PSGallery: this script requires it and updates it from there
+    # Only used to see whether the gallery answers. Nothing depends on this module staying
+    # published, and it does not have to be installed from the gallery: on PowerShell 7.4
+    # and later it is the copy bundled under $PSHOME, which this script does not manage
     $probeName = 'Microsoft.PowerShell.PSResourceGet'
 
     $found = @()
@@ -1290,29 +1312,34 @@ function Find-GalleryModules {
 
     for ($attempt = 1; $attempt -le $maxAttempts; $attempt++) {
         $unanswered = @()
+        $probeErrors = @()
         $lookupErrors = @()
 
         try {
-            Find-PSResource -Name $probeName -Repository PSGallery -ErrorAction Stop | Out-Null
+            Find-PSResource -Name $probeName -Repository PSGallery `
+                -ErrorAction SilentlyContinue -ErrorVariable probeErrors | Out-Null
+            $unanswered = @($probeErrors | Where-Object { $_.FullyQualifiedErrorId -notlike 'PackageNotFound,*' })
 
-            $batch = @(Find-PSResource -Name $pending -Repository PSGallery `
-                -ErrorAction SilentlyContinue -ErrorVariable lookupErrors)
-            $found += $batch
+            if ($unanswered.Count -eq 0) {
+                $batch = @(Find-PSResource -Name $pending -Repository PSGallery `
+                    -ErrorAction SilentlyContinue -ErrorVariable lookupErrors)
+                $found += $batch
 
-            $notFoundErrors = @($lookupErrors | Where-Object { $_.FullyQualifiedErrorId -like 'PackageNotFound,*' })
-            $unanswered = @($lookupErrors | Where-Object { $_.FullyQualifiedErrorId -notlike 'PackageNotFound,*' })
+                $notFoundErrors = @($lookupErrors | Where-Object { $_.FullyQualifiedErrorId -like 'PackageNotFound,*' })
+                $unanswered = @($lookupErrors | Where-Object { $_.FullyQualifiedErrorId -notlike 'PackageNotFound,*' })
 
-            # The name is only available inside the message. If a future PSResourceGet
-            # words it differently, these modules stay in $pending and are counted as
-            # unchecked, which errs on the side of reporting too much
-            $notOnGallery = @($notFoundErrors | ForEach-Object {
-                if ($_.Exception.Message -match "'([^']+)'") { $Matches[1] }
-            })
-            $pending = @($pending | Where-Object { ($_ -notin $batch.Name) -and ($_ -notin $notOnGallery) })
+                # The name is only available inside the message. If a future PSResourceGet
+                # words it differently, these modules stay in $pending and are counted as
+                # unchecked, which errs on the side of reporting too much
+                $notOnGallery = @($notFoundErrors | ForEach-Object {
+                    if ($_.Exception.Message -match "'([^']+)'") { $Matches[1] }
+                })
+                $pending = @($pending | Where-Object { ($_ -notin $batch.Name) -and ($_ -notin $notOnGallery) })
+            }
         }
         catch {
-            # The probe failed, or the bulk query threw outright. Either way nothing
-            # still pending got an answer this attempt
+            # The probe or the bulk query threw outright. Either way nothing still
+            # pending got an answer this attempt
             $unanswered = @($_)
         }
 
@@ -1777,14 +1804,15 @@ try {
     # The closing line has to agree with the toast and the ping. It used to claim success
     # unconditionally, which on 2026-09-27 put "completed successfully" directly above a
     # Fail ping for a run where both updates had been unsuccessful
-    $failureCount = Get-SummaryFailureCount -Summary $script:Summary
+    $failures = Get-SummaryFailures -Summary $script:Summary
 
     Write-Log "======================================================"
-    if ($failureCount -gt 0) {
-        $lookupsFailed = $script:Summary.ModulesUnchecked
-        $updatesFailed = $script:Summary.ModulesFailed.Count
-        $pinsFailed = $script:Summary.PinsFailed.Count
-        $prunesFailed = $script:Summary.PrunesFailed.Count
+    if ($failures.Total -gt 0) {
+        $failureCount = $failures.Total
+        $lookupsFailed = $failures.Lookups
+        $updatesFailed = $failures.Updates
+        $pinsFailed = $failures.Pins
+        $prunesFailed = $failures.Prunes
         Write-Log "PSModuleMaintenance completed with $failureCount unsuccessful operation(s) (lookups: $lookupsFailed, updates: $updatesFailed, pins: $pinsFailed, prunes: $prunesFailed)" -Level WARN
     }
     else {
@@ -1804,7 +1832,7 @@ finally {
 
     # Send toast notification based on config
     $notifyMode = $script:Config.NotificationMode
-    $hasFailures = (Get-SummaryFailureCount -Summary $script:Summary) -gt 0
+    $hasFailures = (Get-SummaryFailures -Summary $script:Summary).Total -gt 0
 
     if ($notifyMode -eq 'Always' -or ($notifyMode -eq 'OnFailure' -and $hasFailures)) {
         Send-ToastNotification -Summary $script:Summary -SkippedUpdates:$PruneOnly -SkippedPruning:$UpdateOnly

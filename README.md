@@ -20,7 +20,7 @@ Automated PowerShell module maintenance for Windows. Updates all PSResourceGet-m
 
 - Windows 10/11 or Windows Server 2019+
 - PowerShell 7.0 or later
-- [Microsoft.PowerShell.PSResourceGet](https://www.powershellgallery.com/packages/Microsoft.PowerShell.PSResourceGet) module
+- [Microsoft.PowerShell.PSResourceGet](https://www.powershellgallery.com/packages/Microsoft.PowerShell.PSResourceGet) module — included with PowerShell 7.4 and later; on 7.0–7.3 install it from the gallery
 
 ## Quick Start
 
@@ -307,7 +307,7 @@ C:\ProgramData\PSModuleMaintenance\Logs\
 
 `PinsSatisfied` counts modules already on their pinned version, `PinsEnforced` counts pins this run had to install, and `PinsHoldingBack` lists the newer releases each pin is declining — useful for periodically reviewing whether a pin is still needed.
 
-`ModulesUnchecked` counts installed modules that PSGallery gave no answer for, with the reason in `GalleryFault`. `ModulesChecked` excludes them, so an unreachable gallery reads `"ModulesChecked": 0` rather than looking like a full check that found nothing. A module that simply is not on PSGallery counts as checked.
+`ModulesUnchecked` counts installed modules that PSGallery gave no answer for, with the reason in `GalleryFault`. Any non-zero value is reported as a single failure. `ModulesChecked` excludes them, so an unreachable gallery reads `"ModulesChecked": 0` rather than looking like a full check that found nothing. A module that simply is not on PSGallery counts as checked.
 
 ## Uninstall
 
@@ -475,8 +475,11 @@ everything is up to date:
 [WARN] PSGallery gave no answer for 164 module(s) (attempt 1 of 3): No such host is known. Retrying in 5s
 [WARN] PSGallery gave no answer for 164 module(s) (attempt 2 of 3): No such host is known. Retrying in 15s
 [ERROR] Could not reach PSGallery, so none of the 164 installed modules were checked for updates: ...
-[WARN] PSModuleMaintenance completed with 164 unsuccessful operation(s) (lookups: 164, updates: 0, pins: 0, prunes: 0)
+[WARN] PSModuleMaintenance completed with 1 unsuccessful operation(s) (lookups: 1, updates: 0, pins: 0, prunes: 0)
 ```
+
+An outage counts as one unsuccessful operation, not one per module. The number of modules
+it affected is in the ERROR line and in `ModulesUnchecked` in the summary.
 
 Pruning still runs, since it needs no network. If only some lookups go unanswered, the rest
 are updated as normal and the log names the modules that were skipped.
