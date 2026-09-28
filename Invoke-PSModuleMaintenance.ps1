@@ -795,6 +795,85 @@ function Test-OneDrivePath {
     return $false
 }
 
+function Test-ManagedModuleFolder {
+    <#
+    .SYNOPSIS
+        Tests whether a module folder was installed by PSResourceGet (or PowerShellGet), as
+        opposed to being put there by another program's installer.
+
+    .NOTES
+        The marker is PSGetModuleInfo.xml, which both write into every version folder they
+        install. Without it Get-PSResource does not list the module, so this script can
+        neither update nor prune it, and has no business reporting or moving it.
+
+        Microsoft.PowerToys.Configure is the case that prompted this. PowerToys installs it
+        to Documents\PowerShell\Modules by itself and re-creates it on every update, so the
+        "run Invoke-OneDriveMigration.ps1" warning came back week after week and could
+        never be cleared by doing what it said.
+    #>
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param(
+        [Parameter(Mandatory)]
+        [string]$ModuleFolder
+    )
+
+    # Depth 1 reaches the version folders, and also covers a module with no version
+    # folder. -Force because the marker is a hidden file
+    $marker = Get-ChildItem -LiteralPath $ModuleFolder -Filter 'PSGetModuleInfo.xml' -File `
+        -Recurse -Depth 1 -Force -ErrorAction SilentlyContinue | Select-Object -First 1
+
+    return [bool]$marker
+}
+
+function Resolve-ModuleVersionFolder {
+    <#
+    .SYNOPSIS
+        Returns the folder a module version actually occupies under a modules root, or
+        $null if it is not there.
+
+    .NOTES
+        Looks on disk instead of trusting InstalledLocation, which is written at install
+        time and never corrected. A module migrated out of OneDrive still reports its old
+        OneDrive path there while living in Program Files.
+
+        Versions are compared, not folder names, because the folder can be 6.1907.1.0
+        where PSResourceGet reports 6.1907.1.
+    #>
+    [CmdletBinding()]
+    [OutputType([string])]
+    param(
+        [Parameter(Mandatory)]
+        [string]$ModulesRoot,
+
+        [Parameter(Mandatory)]
+        [string]$Name,
+
+        [Parameter(Mandatory)]
+        [version]$Version
+    )
+
+    $folder = $null
+    $moduleFolder = Join-Path $ModulesRoot $Name
+
+    if (Test-Path -LiteralPath $moduleFolder) {
+        $wanted = ConvertTo-NormalizedVersion $Version
+
+        $match = Get-ChildItem -LiteralPath $moduleFolder -Directory -Force -ErrorAction SilentlyContinue |
+            Where-Object {
+                $parsed = $null
+                ([version]::TryParse($_.Name, [ref]$parsed)) -and
+                    ((ConvertTo-NormalizedVersion $parsed) -eq $wanted)
+            } | Select-Object -First 1
+
+        if ($match) {
+            $folder = $match.FullName
+        }
+    }
+
+    return $folder
+}
+
 function Remove-LockedModuleFolder {
     <#
     .SYNOPSIS
@@ -1621,9 +1700,16 @@ function Remove-OldModuleVersions {
     $allModules = Get-PSResource @getParams | Where-Object { $_.Name -notin $script:Config.ExcludedModules }
 
     # --- Pass 1: Remove old versions of AllUsers modules (keep latest) ---
+    $allUsersModulePath = Join-Path $env:ProgramFiles 'PowerShell\Modules'
+
     if ($isOneDrive) {
-        # Only prune modules NOT in OneDrive (AllUsers modules)
-        $nonOneDriveModules = $allModules | Where-Object { -not ($_.InstalledLocation -like "$currentUserModulePath*") }
+        # Only prune what is physically in the AllUsers path. This used to filter on
+        # InstalledLocation, but a module migrated out of OneDrive still reports its old
+        # OneDrive path there. That hid every migrated module from pruning for good, so
+        # old versions stayed while the log said "Found 0 modules with multiple versions"
+        $nonOneDriveModules = $allModules | Where-Object {
+            Resolve-ModuleVersionFolder -ModulesRoot $allUsersModulePath -Name $_.Name -Version $_.Version
+        }
     }
     else {
         $nonOneDriveModules = $allModules
@@ -1683,12 +1769,23 @@ function Remove-OldModuleVersions {
                         continue
                     }
 
-                    # If access denied / cannot delete, try force-removing the folder directly
-                    $folderPath = $oldVersion.InstalledLocation
+                    # If access denied / cannot delete, try force-removing the folder directly.
+                    # With OneDrive in play the folder is looked up on disk, because
+                    # InstalledLocation may still name the OneDrive path it was migrated from
+                    $folderPath = $null
+                    if ($isOneDrive) {
+                        $folderPath = Resolve-ModuleVersionFolder -ModulesRoot $allUsersModulePath `
+                            -Name $oldVersion.Name -Version $oldVersion.Version
+                    }
+                    $foundOnDisk = [bool]$folderPath
+                    if (-not $foundOnDisk) {
+                        $folderPath = $oldVersion.InstalledLocation
+                    }
+
                     # PSResourceGet sometimes returns the modules root or module base instead
                     # of the version folder — detect and correct this
                     $versionString = $oldVersion.Version.ToString()
-                    if ($folderPath -and -not $folderPath.EndsWith($versionString)) {
+                    if ((-not $foundOnDisk) -and $folderPath -and -not $folderPath.EndsWith($versionString)) {
                         # Try to extract the correct path from the error message
                         if ($errorMsg -match "Parent directory '([^']+)'") {
                             $folderPath = $Matches[1]
@@ -1729,16 +1826,26 @@ function Remove-OldModuleVersions {
     # After migration, modules should live in AllUsers only. If new modules appear
     # in the OneDrive CurrentUser path, warn the user instead of silently deleting them.
     if ($isOneDrive -and (Test-Path $currentUserModulePath)) {
-        $odModuleFolders = Get-ChildItem -Path $currentUserModulePath -Directory -ErrorAction SilentlyContinue |
+        $odModuleFolders = @(Get-ChildItem -Path $currentUserModulePath -Directory -ErrorAction SilentlyContinue |
             Where-Object {
                 # Only count folders that contain version subfolders (real modules)
                 Get-ChildItem -Path $_.FullName -Directory -ErrorAction SilentlyContinue |
                     Where-Object { $_.Name -match '^\d+(\.\d+){1,3}$' }
-            }
+            })
 
-        if ($odModuleFolders.Count -gt 0) {
-            $moduleNames = ($odModuleFolders | Select-Object -ExpandProperty Name) -join ', '
-            Write-Log "Found $($odModuleFolders.Count) module(s) in OneDrive path: $moduleNames — run Invoke-OneDriveMigration.ps1 to migrate them" -Level WARN
+        # Only a module PSResourceGet installed can be migrated and then kept up to date.
+        # One that another program put here belongs to that program and stays put
+        $toMigrate = @($odModuleFolders | Where-Object { Test-ManagedModuleFolder -ModuleFolder $_.FullName })
+        $leftAlone = @($odModuleFolders | Where-Object { $_.Name -notin $toMigrate.Name })
+
+        if ($toMigrate.Count -gt 0) {
+            $moduleNames = ($toMigrate | Select-Object -ExpandProperty Name) -join ', '
+            Write-Log "Found $($toMigrate.Count) module(s) in OneDrive path: $moduleNames — run Invoke-OneDriveMigration.ps1 to migrate them" -Level WARN
+        }
+
+        if ($leftAlone.Count -gt 0) {
+            $leftAloneNames = ($leftAlone | Select-Object -ExpandProperty Name) -join ', '
+            Write-Log "Leaving $($leftAlone.Count) module(s) in OneDrive path alone, installed by another program: $leftAloneNames"
         }
     }
 

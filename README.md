@@ -353,7 +353,7 @@ Solving this required fighting four systems at once, each with undocumented edge
 `Invoke-OneDriveMigration.ps1` is a standalone one-time migration script that:
 
 1. **Detects** if your CurrentUser module path is inside a OneDrive-synced folder
-2. **Copies** all modules to AllUsers scope (`$env:ProgramFiles\PowerShell\Modules`) — safely, without deleting the originals
+2. **Copies** the modules PSResourceGet installed to AllUsers scope (`$env:ProgramFiles\PowerShell\Modules`) — safely, without deleting the originals
 3. **Cleans up** the old OneDrive copies with four-stage force-removal for cloud placeholders and locked files (see [Troubleshooting](#onedrive-file-lock--cloud-placeholder-errors))
 
 After migration, the weekly maintenance script (`Invoke-PSModuleMaintenance.ps1`) automatically detects OneDrive on the module path and targets AllUsers scope for all future updates and pruning — no configuration needed.
@@ -361,6 +361,21 @@ After migration, the weekly maintenance script (`Invoke-PSModuleMaintenance.ps1`
 The migration is **idempotent and gradual** — modules that already exist at the destination are skipped, and OneDrive copies that can't be removed are either force-deleted or scheduled for reboot deletion.
 
 If you skip migration, the weekly maintenance script will still work (it detects OneDrive and targets AllUsers scope automatically), but any modules left in the OneDrive path will trigger a warning in the logs: `Found N module(s) in OneDrive path — run Invoke-OneDriveMigration.ps1 to migrate them`.
+
+#### Modules that belong to another program
+
+Some programs install a PowerShell module of their own into `Documents\PowerShell\Modules`.
+PowerToys does this with `Microsoft.PowerToys.Configure`, and writes it again on every
+PowerToys update. Such a module is not installed through PSResourceGet, so this tool can
+neither update nor prune it, and moving it would only leave an orphaned copy behind.
+
+Both scripts recognise these modules by the absence of `PSGetModuleInfo.xml`, the marker
+PSResourceGet writes into everything it installs, and leave them where they are. There is
+nothing to configure. The weekly log notes them without raising a warning:
+
+```
+[INFO] Leaving 1 module(s) in OneDrive path alone, installed by another program: Microsoft.PowerToys.Configure
+```
 
 ### Usage
 
@@ -383,7 +398,7 @@ If you skip migration, the weekly maintenance script will still work (it detects
 4. **Self-Check** — Warns if the scheduled task launches a hard-coded interpreter path that a PowerShell reinstall would break
 5. **Clean Old Logs** — Removes logs older than retention period
 6. **Update Modules** — Bulk checks PSGallery for available updates, then updates each module in an isolated runspace with a per-module timeout (targets AllUsers scope when OneDrive is detected). Transient network faults are retried; timeouts are not. If PSGallery cannot be reached at all, the run is reported as unsuccessful instead of as up to date
-7. **Prune Versions** — Groups modules by name, keeps newest, removes the rest (skips built-in modules like PackageManagement). When OneDrive is detected and modules are found in the CurrentUser path, logs a warning to run `Invoke-OneDriveMigration.ps1`
+7. **Prune Versions** — Groups modules by name, keeps newest, removes the rest (skips built-in modules like PackageManagement). When OneDrive is detected and modules installed by PSResourceGet are found in the CurrentUser path, logs a warning to run `Invoke-OneDriveMigration.ps1`. Modules another program put there are left alone
 8. **Save Summary** — Writes JSON summary after each phase (incremental saves protect against process termination)
 9. **Toast Notification** — Shows a Windows toast with the run summary (if enabled via `NotificationMode`)
 10. **Healthchecks Ping** — Sends a success or fail ping with the run summary as the body (if enabled)

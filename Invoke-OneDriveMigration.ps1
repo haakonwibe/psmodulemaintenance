@@ -100,6 +100,36 @@ function Test-OneDrivePath {
     return $false
 }
 
+function Test-ManagedModuleFolder {
+    <#
+    .SYNOPSIS
+        Tests whether a module folder was installed by PSResourceGet (or PowerShellGet), as
+        opposed to being put there by another program's installer.
+
+    .NOTES
+        The marker is PSGetModuleInfo.xml, which both write into every version folder they
+        install. A module without it is not ours to move: once copied to Program Files
+        nothing would ever update or remove it, and the program that owns it re-creates
+        the original on its next update anyway.
+
+        This happened to Microsoft.PowerToys.Configure: every migration left another
+        orphaned copy of it in Program Files.
+    #>
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param(
+        [Parameter(Mandatory)]
+        [string]$ModuleFolder
+    )
+
+    # Depth 1 reaches the version folders, and also covers a module with no version
+    # folder. -Force because the marker is a hidden file
+    $marker = Get-ChildItem -LiteralPath $ModuleFolder -Filter 'PSGetModuleInfo.xml' -File `
+        -Recurse -Depth 1 -Force -ErrorAction SilentlyContinue | Select-Object -First 1
+
+    return [bool]$marker
+}
+
 function Remove-LockedModuleFolder {
     <#
     .SYNOPSIS
@@ -295,15 +325,27 @@ if (-not $moduleFolders) {
 $copiedCount = 0
 $copyFailures = @()
 
+# Modules another program installed. They are neither copied nor cleaned up
+$leftInPlace = @()
+
 foreach ($moduleFolder in $moduleFolders) {
     $versionFolders = Get-ChildItem -Path $moduleFolder.FullName -Directory -ErrorAction SilentlyContinue |
         Where-Object { $_.Name -match '^\d+(\.\d+){1,3}$' }
 
     # Some modules don't use version subfolders -- check for a manifest directly
+    $manifest = $null
     if (-not $versionFolders) {
         $manifest = Get-ChildItem -Path $moduleFolder.FullName -Filter '*.psd1' -ErrorAction SilentlyContinue | Select-Object -First 1
         if (-not $manifest) { continue }
+    }
 
+    if (-not (Test-ManagedModuleFolder -ModuleFolder $moduleFolder.FullName)) {
+        Write-Log "Leaving $($moduleFolder.Name) in place: not installed by PSResourceGet, so it belongs to another program"
+        $leftInPlace += $moduleFolder.Name
+        continue
+    }
+
+    if (-not $versionFolders) {
         # Treat the module folder itself as the item to copy
         $destPath = Join-Path $allUsersPath $moduleFolder.Name
         if (Test-Path $destPath) {
@@ -365,6 +407,8 @@ elseif ($copiedCount -eq 0 -and $copyFailures.Count -eq 0) {
     $odModuleFolders = Get-ChildItem -Path $currentUserModulePath -Directory -ErrorAction SilentlyContinue
     $hasVersionFolders = $false
     foreach ($mf in $odModuleFolders) {
+        if ($mf.Name -in $leftInPlace) { continue }
+
         $vf = Get-ChildItem -Path $mf.FullName -Directory -ErrorAction SilentlyContinue |
             Where-Object { $_.Name -match '^\d+(\.\d+){1,3}$' }
         if ($vf) { $hasVersionFolders = $true; break }
@@ -386,6 +430,9 @@ if (-not $SkipCleanup) {
         $rebootScheduled = 0
 
         foreach ($moduleFolder in $odModuleFolders) {
+            # Never delete what was not copied. These belong to another program
+            if ($moduleFolder.Name -in $leftInPlace) { continue }
+
             $versionFolders = Get-ChildItem -Path $moduleFolder.FullName -Directory -ErrorAction SilentlyContinue |
                 Where-Object { $_.Name -match '^\d+(\.\d+){1,3}$' }
 
@@ -431,6 +478,9 @@ Write-Log "======================================================"
 Write-Log "OneDrive Module Migration completed" -Level SUCCESS
 Write-Log "======================================================"
 Write-Log "  Modules copied to AllUsers: $copiedCount"
+if ($leftInPlace.Count -gt 0) {
+    Write-Log "  Left in place, installed by another program: $($leftInPlace -join ', ')"
+}
 if (-not $SkipCleanup) {
     Write-Log "  OneDrive copies removed: $removedCount"
     if ($removeFailures.Count -gt 0) {
