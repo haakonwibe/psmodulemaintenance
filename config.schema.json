@@ -36,6 +36,24 @@
         { "Az.Accounts": "2.19.0", "Pester": "5.5.0" }
       ]
     },
+    "KeepVersions": {
+      "type": "object",
+      "description": "Older version lines to keep next to the newest version. Each line is protected from pruning and updated within itself, while the module is updated as normal. A line is only maintained once a version of it is installed. A module listed in ExcludedModules is skipped entirely and its entry here is ignored.",
+      "additionalProperties": {
+        "type": "array",
+        "description": "Version prefixes, each naming a line: \"5\" is every 5.x.y, \"5.7\" is every 5.7.x. Quote them, or 5.10 is read as the number 5.1.",
+        "items": {
+          "type": "string",
+          "pattern": "^[0-9]+(\\.[0-9]+){0,3}$"
+        },
+        "minItems": 1,
+        "uniqueItems": true
+      },
+      "default": {},
+      "examples": [
+        { "Pester": ["5"] }
+      ]
+    },
     "LogRetentionDays": {
       "type": "integer",
       "description": "Number of days to retain log files before automatic cleanup",

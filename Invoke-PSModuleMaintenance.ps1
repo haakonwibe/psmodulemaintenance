@@ -63,6 +63,7 @@ $ProgressPreference = 'SilentlyContinue'
 $script:Config = @{
     ExcludedModules = @()
     PinnedModules = @{}
+    KeepVersions = @{}
     LogRetentionDays = 180
     TrustPSGallery = $true
     NotificationMode = 'Always'
@@ -109,6 +110,63 @@ function ConvertTo-PinnedModuleTable {
     return $table
 }
 
+function ConvertTo-KeepVersionTable {
+    <#
+    .SYNOPSIS
+        Converts the KeepVersions JSON object into a hashtable of module name to parsed
+        selectors. Anything unusable is dropped with a warning.
+
+    .NOTES
+        The table has to be a plain @{}, which looks names up without regard to case. The
+        name in the config and the name of the installed module need not be cased alike.
+    #>
+    [CmdletBinding()]
+    param($KeepConfig)
+
+    $table = @{}
+
+    if ($KeepConfig -isnot [PSCustomObject]) {
+        $script:ConfigWarnings += 'Ignoring KeepVersions: it has to be an object that maps a module name to a list of version prefixes'
+    }
+    else {
+        foreach ($entry in $KeepConfig.PSObject.Properties) {
+            $selectors = @()
+            $seen = @()
+
+            # @() also accepts a single value written without the list brackets
+            foreach ($value in @($entry.Value)) {
+                if ($null -eq $value) {
+                    continue
+                }
+                if ($value -isnot [string]) {
+                    $script:ConfigWarnings += "Ignoring a KeepVersions selector for '$($entry.Name)': it has to be a string in quotes, such as `"5`""
+                    continue
+                }
+
+                $selector = ConvertFrom-KeepVersionSelector -Value $value
+                if (-not $selector) {
+                    $script:ConfigWarnings += "Ignoring KeepVersions selector for '$($entry.Name)': '$value' is not a version prefix such as 5 or 5.7"
+                    continue
+                }
+
+                if ($selector.Key -notin $seen) {
+                    $seen += $selector.Key
+                    $selectors += $selector
+                }
+            }
+
+            if ($selectors.Count -eq 0) {
+                $script:ConfigWarnings += "Ignoring KeepVersions for '$($entry.Name)': the list holds no usable selector"
+                continue
+            }
+
+            $table[$entry.Name] = @($selectors)
+        }
+    }
+
+    return $table
+}
+
 function Import-MaintenanceConfig {
     [CmdletBinding()]
     param([string]$Path)
@@ -126,6 +184,9 @@ function Import-MaintenanceConfig {
             }
             if ($jsonConfig.PinnedModules) {
                 $script:Config.PinnedModules = ConvertTo-PinnedModuleTable $jsonConfig.PinnedModules
+            }
+            if ($jsonConfig.KeepVersions) {
+                $script:Config.KeepVersions = ConvertTo-KeepVersionTable $jsonConfig.KeepVersions
             }
             if ($null -ne $jsonConfig.LogRetentionDays) {
                 $script:Config.LogRetentionDays = $jsonConfig.LogRetentionDays
@@ -155,6 +216,14 @@ function Import-MaintenanceConfig {
                 if ($name -in $script:Config.ExcludedModules) {
                     $script:ConfigWarnings += "'$name' is both excluded and pinned — exclusion takes precedence, the pin is ignored"
                     $script:Config.PinnedModules.Remove($name)
+                }
+            }
+
+            # The same goes for a module that is both excluded and has versions to keep
+            foreach ($name in @($script:Config.KeepVersions.Keys)) {
+                if ($name -in $script:Config.ExcludedModules) {
+                    $script:ConfigWarnings += "'$name' is both excluded and listed in KeepVersions - exclusion takes precedence, the KeepVersions entry is ignored"
+                    $script:Config.KeepVersions.Remove($name)
                 }
             }
 
@@ -191,6 +260,11 @@ $script:Summary = @{
     PinsEnforced = 0
     PinsFailed = @()
     PinsHoldingBack = @()
+    KeepVersions = @{}
+    KeepVersionsMatched = @()
+    KeepVersionsUnmatched = @()
+    KeepLinesUpdated = @()
+    KeepLinesUnchecked = @()
 }
 
 function Initialize-Logging {
@@ -278,6 +352,11 @@ function Get-SummaryFailures {
 
         It does have to count, though. Leaving it out is how an unreachable gallery used
         to pass as a clean run.
+
+        A kept version line that could not be looked up is the same kind of thing, and
+        shares that one count. A kept line whose update did not succeed is an update like
+        any other and sits in ModulesFailed. A KeepVersions selector that matches nothing
+        installed is deliberately not counted at all: it only gets a line in the log.
     #>
     [CmdletBinding()]
     param(
@@ -286,7 +365,7 @@ function Get-SummaryFailures {
     )
 
     $lookups = 0
-    if ($Summary.ModulesUnchecked -gt 0) {
+    if (($Summary.ModulesUnchecked -gt 0) -or ($Summary.KeepLinesUnchecked.Count -gt 0)) {
         $lookups = 1
     }
     $updates = $Summary.ModulesFailed.Count
@@ -348,6 +427,9 @@ function Send-ToastNotification {
             }
             if ($Summary.ModulesUnchecked -gt 0) {
                 $updateText += ", $($Summary.ModulesUnchecked) not checked"
+            }
+            if ($Summary.KeepLinesUnchecked.Count -gt 0) {
+                $updateText += ", $($Summary.KeepLinesUnchecked.Count) kept line(s) not checked"
             }
             $parts += $updateText
         }
@@ -540,8 +622,17 @@ function Format-HealthchecksBody {
     if ($Summary.ModulesUnchecked -gt 0) {
         $issues += "  - lookup: $($Summary.ModulesUnchecked) module(s) not checked: $($Summary.GalleryFault)"
     }
+    $uncheckedLines = @($Summary.KeepLinesUnchecked | Where-Object { $_ })
+    if ($uncheckedLines.Count -gt 0) {
+        $issues += "  - lookup: $($uncheckedLines.Count) kept line(s) not checked: $($uncheckedLines[0].Fault)"
+    }
     foreach ($item in @($Summary.ModulesFailed)) {
-        $issues += "  - update $($item.Module): $($item.Error)"
+        $what = $item.Module
+        if ($item.Line) {
+            # A kept version line, so say which one
+            $what = "$($item.Module) (kept line $($item.Line))"
+        }
+        $issues += "  - update ${what}: $($item.Error)"
     }
     foreach ($item in @($Summary.PrunesFailed)) {
         $issues += "  - prune $($item.Module) $($item.Version): $($item.Error)"
@@ -778,6 +869,333 @@ function Test-IsPinnedVersion {
     )
 
     return (Get-ModuleVersionKey -Version $Resource.Version -Prerelease $Resource.Prerelease) -eq $Pin.Key
+}
+
+function ConvertFrom-KeepVersionSelector {
+    <#
+    .SYNOPSIS
+        Parses a KeepVersions selector such as '5', '5.7' or '5.7.1'.
+        Returns $null if the value is not a version prefix.
+
+    .NOTES
+        A selector names a version line, so it is a prefix of one to four numbers, not a
+        full version. [version] is no help here: it cannot parse '5', and it accepts
+        things a selector must not be, such as ' 5.7 ' with the spaces or '05.7'.
+
+        Only a string is accepted. JSON turns an unquoted 5.10 into the number 5.1, which
+        would silently select the wrong line.
+    #>
+    [CmdletBinding()]
+    param($Value)
+
+    $selector = $null
+
+    if ($Value -is [string]) {
+        $text = $Value.Trim()
+        if ($text -match '^[0-9]+(\.[0-9]+){0,3}$') {
+            $parts = @()
+            $valid = $true
+            foreach ($piece in $text.Split('.')) {
+                $number = 0
+                if ([int]::TryParse($piece, [ref]$number)) {
+                    $parts += $number
+                }
+                else {
+                    $valid = $false
+                }
+            }
+
+            if ($valid) {
+                $selector = [PSCustomObject]@{
+                    Requested = $text
+                    Parts     = $parts
+                    Key       = ($parts -join '.')
+                }
+            }
+        }
+    }
+
+    return $selector
+}
+
+function Test-KeepVersionMatch {
+    <#
+    .SYNOPSIS
+        Tests whether a version belongs to the line a selector names. The comparison is
+        number by number, so '1' does not match 12.4.0 and '5.7' does not match 5.70.1.
+    #>
+    [CmdletBinding()]
+    [OutputType([bool])]
+    param(
+        [Parameter(Mandatory)][version]$Version,
+        [Parameter(Mandatory)]$Selector
+    )
+
+    $normalized = ConvertTo-NormalizedVersion $Version
+    $actual = @($normalized.Major, $normalized.Minor, $normalized.Build, $normalized.Revision)
+
+    $isMatch = $true
+    for ($i = 0; $i -lt $Selector.Parts.Count; $i++) {
+        if ($actual[$i] -ne $Selector.Parts[$i]) {
+            $isMatch = $false
+        }
+    }
+    return $isMatch
+}
+
+function Get-KeepVersionSelectors {
+    <#
+    .SYNOPSIS
+        Returns the parsed KeepVersions selectors for a module name, or an empty list.
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$Name)
+
+    $selectors = @()
+    if ($script:Config.KeepVersions.ContainsKey($Name)) {
+        $selectors = @($script:Config.KeepVersions[$Name])
+    }
+    return $selectors
+}
+
+function Get-KeepVersionRange {
+    <#
+    .SYNOPSIS
+        Builds the NuGet version range that covers every given selector, for one gallery
+        lookup per module. '5' gives '[5.0.0.0, 6.0.0.0)'.
+
+    .NOTES
+        The range is what Find-PSResource needs to return every version in a line. A
+        wildcard must not be used for this: '5.*' was seen returning versions from the
+        line above.
+
+        Several selectors share one range that spans them all. The answer is then
+        filtered per selector with Test-KeepVersionMatch, so what lies between two lines
+        is simply ignored.
+    #>
+    [CmdletBinding()]
+    [OutputType([string])]
+    param([Parameter(Mandatory)][array]$Selectors)
+
+    $lowest = $null
+    $highest = $null
+
+    foreach ($selector in $Selectors) {
+        # Copies, so the selector itself is not changed
+        $from = @($selector.Parts)
+        $to = @($selector.Parts)
+        $to[$to.Count - 1] = $to[$to.Count - 1] + 1
+
+        while ($from.Count -lt 4) { $from += 0 }
+        while ($to.Count -lt 4) { $to += 0 }
+
+        $lower = [version]::new($from[0], $from[1], $from[2], $from[3])
+        $upper = [version]::new($to[0], $to[1], $to[2], $to[3])
+
+        if (($null -eq $lowest) -or ($lower -lt $lowest)) { $lowest = $lower }
+        if (($null -eq $highest) -or ($upper -gt $highest)) { $highest = $upper }
+    }
+
+    return "[$lowest, $highest)"
+}
+
+function Get-ModulePrunePlan {
+    <#
+    .SYNOPSIS
+        Decides which installed versions of one module stay and which go.
+
+    .DESCRIPTION
+        What stays is the newest version, or the pinned one if the module is pinned, plus
+        the newest installed version of every line named in KeepVersions.
+
+        Nothing is removed when the module is pinned and the pinned version is not
+        installed. Removing the rest could leave the module with no version at all.
+
+    .NOTES
+        Pure on purpose: no logging and no script state, so the rules can be tested
+        without standing in for PSResourceGet.
+
+        A version that stays is never removed, even if it is listed twice. The same
+        version can be installed in two scopes, and the older logic treated the second
+        copy as an old version.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [AllowEmptyCollection()]
+        [array]$Resources,
+
+        $Pin,
+
+        [AllowNull()]
+        [AllowEmptyCollection()]
+        [array]$Selectors
+    )
+
+    $sorted = @($Resources | Sort-Object -Property @{ Expression = { ConvertTo-NormalizedVersion $_.Version } } -Descending)
+    $selectorList = @($Selectors | Where-Object { $_ })
+
+    $keepKeys = @()
+    $pinMissing = $false
+    $base = $null
+
+    if ($Pin) {
+        $base = $sorted | Where-Object { Test-IsPinnedVersion -Resource $_ -Pin $Pin } | Select-Object -First 1
+        if (-not $base) {
+            $pinMissing = $true
+        }
+    }
+    else {
+        $base = $sorted | Select-Object -First 1
+    }
+
+    if ($base) {
+        $keepKeys += Get-ModuleVersionKey -Version $base.Version -Prerelease $base.Prerelease
+    }
+
+    $matched = @()
+    $unmatched = @()
+    foreach ($selector in $selectorList) {
+        $hit = $sorted | Where-Object { Test-KeepVersionMatch -Version $_.Version -Selector $selector } |
+            Select-Object -First 1
+
+        if (-not $hit) {
+            $unmatched += $selector.Requested
+            continue
+        }
+
+        $keepKeys += Get-ModuleVersionKey -Version $hit.Version -Prerelease $hit.Prerelease
+
+        $display = $hit.Version.ToString()
+        if ($hit.Prerelease) {
+            $display += "-$($hit.Prerelease)"
+        }
+        $matched += [PSCustomObject]@{
+            Selector = $selector.Requested
+            Version  = $display
+            Resource = $hit
+        }
+    }
+
+    $keep = $sorted
+    $remove = @()
+    if (-not $pinMissing) {
+        $keep = @($sorted | Where-Object {
+            (Get-ModuleVersionKey -Version $_.Version -Prerelease $_.Prerelease) -in $keepKeys
+        })
+        $remove = @($sorted | Where-Object {
+            (Get-ModuleVersionKey -Version $_.Version -Prerelease $_.Prerelease) -notin $keepKeys
+        })
+    }
+
+    return [PSCustomObject]@{
+        Keep       = @($keep)
+        Remove     = @($remove)
+        Matched    = @($matched)
+        Unmatched  = @($unmatched)
+        PinMissing = $pinMissing
+    }
+}
+
+function Get-KeptLinePlan {
+    <#
+    .SYNOPSIS
+        Decides, for each kept line of one module, whether it needs a gallery lookup, can
+        be compared straight away, or is left alone.
+
+    .DESCRIPTION
+        Returns one object per selector with an Action:
+
+        Skip     nothing to do. Reason says why: NotInstalled, Exact, PinInLine or
+                 MainUpdate.
+        Compare  the newest release on the gallery lies in this line, so it is the
+                 target and no further lookup is needed.
+        Lookup   the gallery has to be asked for the versions in this line.
+
+    .NOTES
+        "Covered by the normal update" has to be judged from the gallery, not from what
+        is installed. With only an old line installed, that line looks like the newest
+        one, and skipping it would leave it a release behind.
+
+        The normal update drops pinned modules, so it never covers a line of one.
+
+        Pure on purpose, like Get-ModulePrunePlan.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [AllowEmptyCollection()]
+        [array]$Resources,
+
+        [AllowNull()]
+        [AllowEmptyCollection()]
+        [array]$Selectors,
+
+        $Pin,
+
+        # Newest release of the module on the gallery, from the main lookup
+        [AllowNull()]
+        [version]$GalleryNewest
+    )
+
+    $sorted = @($Resources | Sort-Object -Property @{ Expression = { ConvertTo-NormalizedVersion $_.Version } } -Descending)
+    $newestInstalled = $sorted | Select-Object -First 1
+
+    $plan = @()
+    foreach ($selector in @($Selectors | Where-Object { $_ })) {
+        $installed = $sorted | Where-Object { Test-KeepVersionMatch -Version $_.Version -Selector $selector } |
+            Select-Object -First 1
+
+        $galleryInLine = $false
+        if ($GalleryNewest) {
+            $galleryInLine = Test-KeepVersionMatch -Version $GalleryNewest -Selector $selector
+        }
+
+        $newestInLine = $false
+        if ($newestInstalled) {
+            $newestInLine = Test-KeepVersionMatch -Version $newestInstalled.Version -Selector $selector
+        }
+
+        $pinInLine = $false
+        if ($Pin) {
+            $pinInLine = Test-KeepVersionMatch -Version $Pin.Version -Selector $selector
+        }
+
+        $action = 'Lookup'
+        $reason = $null
+        $target = $null
+
+        if (-not $installed) {
+            $action = 'Skip'
+            $reason = 'NotInstalled'
+        }
+        elseif ($selector.Parts.Count -ge 4) {
+            $action = 'Skip'
+            $reason = 'Exact'
+        }
+        elseif ($pinInLine) {
+            $action = 'Skip'
+            $reason = 'PinInLine'
+        }
+        elseif ($galleryInLine -and $newestInLine -and (-not $Pin)) {
+            $action = 'Skip'
+            $reason = 'MainUpdate'
+        }
+        elseif ($galleryInLine) {
+            $action = 'Compare'
+            $target = $GalleryNewest
+        }
+
+        $plan += [PSCustomObject]@{
+            Selector  = $selector
+            Installed = $installed
+            Action    = $action
+            Reason    = $reason
+            Target    = $target
+        }
+    }
+
+    return $plan
 }
 
 function Test-OneDrivePath {
@@ -1369,11 +1787,20 @@ function Find-GalleryModules {
 
         Unanswered lookups are retried on the same schedule as updates, and only the
         modules still without an answer are asked about again.
+
+        With -Version the question is "which versions exist in this range" and the answer
+        is one resource per version. A range with nothing in it returns nothing and raises
+        NO error, not even PackageNotFound, so an empty answer is an answer. Only an error
+        that is not PackageNotFound means the gallery did not reply.
     #>
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
         [string[]]$Name,
+
+        # A NuGet version range such as '[5.0.0.0, 6.0.0.0)'. Never a wildcard: '5.*' was
+        # seen returning versions from the line above
+        [string]$Version,
 
         # Seconds to wait before each retry. One entry per retry, so two entries means
         # three attempts in total
@@ -1401,8 +1828,14 @@ function Find-GalleryModules {
             $unanswered = @($probeErrors | Where-Object { $_.FullyQualifiedErrorId -notlike 'PackageNotFound,*' })
 
             if ($unanswered.Count -eq 0) {
-                $batch = @(Find-PSResource -Name $pending -Repository PSGallery `
-                    -ErrorAction SilentlyContinue -ErrorVariable lookupErrors)
+                if ($Version) {
+                    $batch = @(Find-PSResource -Name $pending -Version $Version -Repository PSGallery `
+                        -ErrorAction SilentlyContinue -ErrorVariable lookupErrors)
+                }
+                else {
+                    $batch = @(Find-PSResource -Name $pending -Repository PSGallery `
+                        -ErrorAction SilentlyContinue -ErrorVariable lookupErrors)
+                }
                 $found += $batch
 
                 $notFoundErrors = @($lookupErrors | Where-Object { $_.FullyQualifiedErrorId -like 'PackageNotFound,*' })
@@ -1474,6 +1907,236 @@ function Get-GalleryFaultText {
         }
     }
     return $text
+}
+
+function Update-KeptVersionLines {
+    <#
+    .SYNOPSIS
+        Updates every kept version line within itself. A newer release inside a line is
+        installed next to what is already there, and pruning then removes the older one.
+
+    .NOTES
+        A line is only maintained once a version of it is installed. This never brings a
+        line onto a machine that does not have it.
+
+        Has to run before the normal update loop, not after it. Update-AllModules returns
+        early when no module needs updating, which is what happens most weeks.
+
+        The gallery is asked once per module, with a range spanning its lines. Once it
+        fails to answer, the remaining lines are recorded as not checked instead of being
+        asked about one by one.
+
+        An exact version is installed into a folder of its own, so the locked-folder
+        recovery that the normal update needs has nothing to do here.
+    #>
+    [CmdletBinding(SupportsShouldProcess)]
+    param(
+        [Parameter(Mandatory)]
+        [AllowEmptyCollection()]
+        [array]$InstalledResources,
+
+        # What the main lookup returned: the newest release of each module
+        [AllowEmptyCollection()]
+        [array]$GalleryResources = @(),
+
+        # Modules the main lookup got no answer for. Those are already counted
+        [AllowEmptyCollection()]
+        [string[]]$Unchecked = @(),
+
+        [string]$Scope
+    )
+
+    $moduleNames = @($script:Config.KeepVersions.Keys)
+    if ($moduleNames.Count -eq 0) {
+        return
+    }
+
+    Write-Log "Checking kept version lines of $($moduleNames.Count) module(s) for updates..."
+
+    $timeout = $script:Config.ModuleUpdateTimeoutSeconds
+    $updatedCount = 0
+    $unsuccessfulCount = 0
+    $uncheckedCount = 0
+    $galleryAnswers = $true
+    $galleryFault = $null
+
+    foreach ($configName in $moduleNames) {
+        $resources = @($InstalledResources | Where-Object { $_.Name -eq $configName })
+        if ($resources.Count -eq 0) {
+            Write-Log "Kept lines of $configName skipped: the module is not installed"
+            continue
+        }
+
+        # From here on the name as installed, which may be cased differently
+        $name = $resources[0].Name
+
+        if ($name -in $Unchecked) {
+            Write-Log "Kept lines of $name not checked: PSGallery gave no answer for this module" -Level WARN
+            continue
+        }
+
+        $galleryNewest = ($GalleryResources | Where-Object { $_.Name -eq $name } |
+            Sort-Object Version -Descending | Select-Object -First 1).Version
+        if (-not $galleryNewest) {
+            Write-Log "Kept lines of $name skipped: the module is not on PSGallery"
+            continue
+        }
+
+        $selectors = @(Get-KeepVersionSelectors -Name $configName)
+        $pin = Get-PinnedVersion $configName
+        $plan = @(Get-KeptLinePlan -Resources $resources -Selectors $selectors -Pin $pin -GalleryNewest $galleryNewest)
+
+        foreach ($entry in @($plan | Where-Object { $_.Action -eq 'Skip' })) {
+            $line = $entry.Selector.Requested
+            switch ($entry.Reason) {
+                'NotInstalled' { Write-Log "Kept line $line of $name has no installed version - nothing to update" }
+                'Exact'        { Write-Log "Kept line $line of $name names one exact version - nothing to update" }
+                'PinInLine'    { Write-Log "Kept line $line of $name holds the pinned version - the pin decides, no line update" }
+                'MainUpdate'   { Write-Log "Kept line $line of $name holds the newest release - covered by the normal update" }
+            }
+        }
+
+        # One lookup for all the lines of this module that need one
+        $candidates = @()
+        $lookupAnswered = $true
+        $toLookUp = @($plan | Where-Object { $_.Action -eq 'Lookup' })
+
+        if ($toLookUp.Count -gt 0) {
+            $lineList = ($toLookUp | ForEach-Object { $_.Selector.Requested }) -join ', '
+
+            if ($galleryAnswers) {
+                $range = Get-KeepVersionRange -Selectors @($toLookUp | ForEach-Object { $_.Selector })
+                $lineLookup = Find-GalleryModules -Name $name -Version $range
+
+                if ($lineLookup.Unchecked.Count -gt 0) {
+                    $galleryAnswers = $false
+                    $galleryFault = $lineLookup.Fault
+                    $lookupAnswered = $false
+                    Write-Log "Could not check kept line(s) $lineList of $name for updates: $($lineLookup.Detail)" -Level ERROR
+                }
+                else {
+                    # A line update never installs a prerelease
+                    $candidates = @($lineLookup.Resources | Where-Object { -not $_.Prerelease })
+                }
+            }
+            else {
+                $lookupAnswered = $false
+                Write-Log "Kept line(s) $lineList of $name not checked: PSGallery stopped answering earlier in this run" -Level WARN
+            }
+
+            if (-not $lookupAnswered) {
+                foreach ($entry in $toLookUp) {
+                    $script:Summary.KeepLinesUnchecked += @{
+                        Module = $name
+                        Line   = $entry.Selector.Requested
+                        Fault  = $galleryFault
+                    }
+                    $uncheckedCount++
+                }
+            }
+        }
+
+        # Work out the target of each line and whether it is ahead of what is installed
+        $pending = @()
+        foreach ($entry in @($plan | Where-Object { $_.Action -in 'Compare', 'Lookup' })) {
+            if (($entry.Action -eq 'Lookup') -and (-not $lookupAnswered)) {
+                continue
+            }
+
+            $line = $entry.Selector.Requested
+            $target = $entry.Target
+
+            if ($entry.Action -eq 'Lookup') {
+                $selector = $entry.Selector
+                $target = ($candidates |
+                    Where-Object { Test-KeepVersionMatch -Version $_.Version -Selector $selector } |
+                    Sort-Object -Property @{ Expression = { ConvertTo-NormalizedVersion $_.Version } } -Descending |
+                    Select-Object -First 1).Version
+
+                if (-not $target) {
+                    Write-Log "Kept line $line of $name has no release on PSGallery - nothing to update"
+                    continue
+                }
+            }
+
+            $installedText = $entry.Installed.Version.ToString()
+            if ($entry.Installed.Prerelease) {
+                $installedText += "-$($entry.Installed.Prerelease)"
+            }
+
+            # By number only, as the normal update compares. A prerelease with the same
+            # number as the stable release shares its folder and is not replaced
+            $normalizedTarget = ConvertTo-NormalizedVersion $target
+            $normalizedInstalled = ConvertTo-NormalizedVersion $entry.Installed.Version
+
+            if ($normalizedTarget -gt $normalizedInstalled) {
+                $pending += [PSCustomObject]@{
+                    Line   = $line
+                    From   = $installedText
+                    Target = $target.ToString()
+                }
+            }
+            elseif ($normalizedTarget -eq $normalizedInstalled) {
+                Write-Log "Kept line $line of $name is up to date at $installedText"
+            }
+            else {
+                Write-Log "Kept line $line of $name is at $installedText, ahead of $target on PSGallery - left as it is"
+            }
+        }
+
+        # Two lines can share a target. It is installed once
+        foreach ($group in @($pending | Group-Object Target)) {
+            $targetText = $group.Name
+            $lines = ($group.Group | ForEach-Object { $_.Line }) -join ', '
+            $from = $group.Group[0].From
+
+            try {
+                if ($PSCmdlet.ShouldProcess("$name line $lines`: $from -> $targetText", 'Update kept version line')) {
+                    Write-Log "Updating kept line $lines of ${name}: $from -> $targetText"
+
+                    $lineTimer = [System.Diagnostics.Stopwatch]::StartNew()
+
+                    Invoke-ModuleUpdateWithRetry -Name $name -Scope $Scope `
+                        -TrustRepository $script:Config.TrustPSGallery -TimeoutSeconds $timeout `
+                        -Version $targetText
+
+                    $script:Summary.ModulesUpdated++
+                    $updatedCount++
+                    foreach ($item in $group.Group) {
+                        $script:Summary.KeepLinesUpdated += @{
+                            Module = $name
+                            Line   = $item.Line
+                            From   = $item.From
+                            To     = $targetText
+                        }
+                    }
+                    Write-Log "Updated kept line $lines of $name to $targetText (took $([math]::Round($lineTimer.Elapsed.TotalSeconds))s)" -Level SUCCESS
+                }
+            }
+            catch [System.TimeoutException] {
+                Write-Log "Timed out updating kept line $lines of $name to $targetText after ${timeout}s - skipping" -Level ERROR
+                $script:Summary.ModulesFailed += @{
+                    Module  = $name
+                    Version = $targetText
+                    Line    = $lines
+                    Error   = $_.Exception.Message
+                }
+                $unsuccessfulCount++
+            }
+            catch {
+                Write-Log "Failed to update kept line $lines of $name to ${targetText}: $($_.Exception.Message)" -Level ERROR
+                $script:Summary.ModulesFailed += @{
+                    Module  = $name
+                    Version = $targetText
+                    Line    = $lines
+                    Error   = $_.Exception.Message
+                }
+                $unsuccessfulCount++
+            }
+        }
+    }
+
+    Write-Log "Kept line updates complete. Updated: $updatedCount, Unsuccessful: $unsuccessfulCount, Not checked: $uncheckedCount"
 }
 
 function Update-AllModules {
@@ -1569,6 +2232,11 @@ function Update-AllModules {
     }
 
     $installed = @($installed | Where-Object { -not (Get-PinnedVersion $_.Name) })
+
+    # Kept version lines are updated here, before the normal updates. Further down this
+    # function returns as soon as no module needs updating, which is most weeks
+    Update-KeptVersionLines -InstalledResources $allResources -GalleryResources @($gallery) `
+        -Unchecked @($lookup.Unchecked) -Scope $scope
 
     # Find modules that need updates
     $needsUpdate = @()
@@ -1686,6 +2354,83 @@ function Update-AllModules {
     Write-Log "Module updates complete. Updated: $($script:Summary.ModulesUpdated), Unsuccessful: $($script:Summary.ModulesFailed.Count)"
 }
 
+function Confirm-KeptModuleVersions {
+    <#
+    .SYNOPSIS
+        Logs which versions KeepVersions protects from pruning, and warns about every
+        selector that matches nothing installed.
+
+    .NOTES
+        This needs a pass of its own. The prune loop only looks at modules with more than
+        one installed version, so a module with a single version and a selector that
+        matches nothing would never be looked at.
+
+        It belongs to the prune phase and is handed the list the prune loop works on.
+        That list is read after the updates, so a line that was just updated shows its
+        new version here.
+
+        A selector that matches nothing is a WARN and nothing more. It installs nothing
+        and does not make the run count as unsuccessful.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [AllowEmptyCollection()]
+        [array]$InstalledResources
+    )
+
+    $moduleNames = @($script:Config.KeepVersions.Keys)
+    if ($moduleNames.Count -eq 0) {
+        return
+    }
+
+    Write-Log "Checking keep-version rules for $($moduleNames.Count) module(s)..."
+
+    foreach ($configName in $moduleNames) {
+        $selectors = @(Get-KeepVersionSelectors -Name $configName)
+        $resources = @($InstalledResources | Where-Object { $_.Name -eq $configName })
+
+        if ($resources.Count -eq 0) {
+            $lineList = ($selectors | ForEach-Object { "'$($_.Requested)'" }) -join ', '
+            Write-Log "KeepVersions: $configName is not installed, so nothing is kept or updated for $lineList" -Level WARN
+            foreach ($selector in $selectors) {
+                $script:Summary.KeepVersionsUnmatched += @{
+                    Module   = $configName
+                    Selector = $selector.Requested
+                }
+            }
+            continue
+        }
+
+        # The name as installed, which may be cased differently from the config
+        $name = $resources[0].Name
+        $pin = Get-PinnedVersion $configName
+        $plan = Get-ModulePrunePlan -Resources $resources -Pin $pin -Selectors $selectors
+
+        # Two selectors can land on the same version. One line in the log names both
+        foreach ($group in @($plan.Matched | Group-Object Version)) {
+            $lines = ($group.Group | ForEach-Object { $_.Selector }) -join ', '
+            Write-Log "Keeping $name v$($group.Name) (KeepVersions: $lines)"
+
+            foreach ($item in $group.Group) {
+                $script:Summary.KeepVersionsMatched += @{
+                    Module   = $name
+                    Selector = $item.Selector
+                    Version  = $item.Version
+                }
+            }
+        }
+
+        foreach ($requested in $plan.Unmatched) {
+            Write-Log "KeepVersions: no installed version of $name matches '$requested'. Nothing is kept or updated for it - a line is only maintained once a version of it is installed" -Level WARN
+            $script:Summary.KeepVersionsUnmatched += @{
+                Module   = $name
+                Selector = $requested
+            }
+        }
+    }
+}
+
 function Remove-OldModuleVersions {
     [CmdletBinding(SupportsShouldProcess)]
     param()
@@ -1723,27 +2468,30 @@ function Remove-OldModuleVersions {
         -not ($_.InstalledLocation -like "$psHomePath*")
     }
 
+    # Say what KeepVersions protects before anything is removed. It sees the same list as
+    # the loop below
+    Confirm-KeptModuleVersions -InstalledResources @($nonOneDriveModules)
+
     # @() matters: a single surviving group is a bare GroupInfo, whose own .Count member is
     # the number of versions in that group, not the number of groups
     $grouped = @($nonOneDriveModules | Group-Object Name | Where-Object { $_.Count -gt 1 })
     Write-Log "Found $($grouped.Count) modules with multiple versions"
 
     foreach ($group in $grouped) {
+        # What stays is the newest version, or the pin, plus the newest version of every
+        # kept line. Everything else goes, newer versions than a pin included
         $pin = Get-PinnedVersion $group.Name
+        $selectors = @(Get-KeepVersionSelectors -Name $group.Name)
+        $plan = Get-ModulePrunePlan -Resources @($group.Group) -Pin $pin -Selectors $selectors
 
-        if ($pin) {
-            # Pinned: the pin is what we keep, so everything else goes — newer versions included.
+        if ($plan.PinMissing) {
             # If the pin isn't installed, prune nothing: removing the rest would leave the
             # module with no version at all.
-            if (-not ($group.Group | Where-Object { Test-IsPinnedVersion -Resource $_ -Pin $pin })) {
-                Write-Log "$($group.Name) is pinned to $($pin.Requested) but that version is not installed — leaving all $($group.Count) installed version(s) in place" -Level WARN
-                continue
-            }
-            $oldVersions = $group.Group | Where-Object { -not (Test-IsPinnedVersion -Resource $_ -Pin $pin) }
+            Write-Log "$($group.Name) is pinned to $($pin.Requested) but that version is not installed — leaving all $($group.Count) installed version(s) in place" -Level WARN
+            continue
         }
-        else {
-            $oldVersions = $group.Group | Sort-Object Version -Descending | Select-Object -Skip 1
-        }
+
+        $oldVersions = $plan.Remove
 
         foreach ($oldVersion in $oldVersions) {
             if ($PSCmdlet.ShouldProcess("$($oldVersion.Name) v$($oldVersion.Version)", "Remove old version")) {
@@ -1876,10 +2624,17 @@ try {
         $script:Summary.PinnedModules[$pinName] = $script:Config.PinnedModules[$pinName].Requested
     }
 
+    # The same for the kept version lines (name -> list of selectors as written)
+    foreach ($keepName in $script:Config.KeepVersions.Keys) {
+        $script:Summary.KeepVersions[$keepName] = @($script:Config.KeepVersions[$keepName] |
+            ForEach-Object { $_.Requested })
+    }
+
     # Log configuration
     Write-Log "Configuration loaded:"
     Write-Log "  - Excluded modules: $($script:Config.ExcludedModules.Count)"
     Write-Log "  - Pinned modules: $($script:Config.PinnedModules.Count)"
+    Write-Log "  - Modules with kept versions: $($script:Config.KeepVersions.Count)"
     Write-Log "  - Log retention: $($script:Config.LogRetentionDays) days"
     Write-Log "  - Trust PSGallery: $($script:Config.TrustPSGallery)"
     Write-Log "  - Notification mode: $($script:Config.NotificationMode)"

@@ -31,21 +31,32 @@ function Write-Log {
 
 $probe = 'Microsoft.PowerShell.PSResourceGet'
 $script:FindCalls = @()
+$script:FindVersions = @()
 $script:Outcome = { 'ok' }
 
 # The outcome script block is given the module name and the call number, and answers
-# ok, notfound, reworded, network or throw
+# ok, several, nothing, notfound, reworded, network or throw
 function Find-PSResource {
     [CmdletBinding()]
-    param([string[]]$Name, [string]$Repository)
+    param([string[]]$Name, [string]$Repository, [string]$Version)
 
     $script:FindCalls += , @($Name)
+    $script:FindVersions += $Version
     $callNumber = $script:FindCalls.Count
 
     foreach ($n in $Name) {
         switch (& $script:Outcome $n $callNumber) {
             'ok' {
                 [PSCustomObject]@{ Name = $n; Version = [version]'9.9.9' }
+            }
+            'several' {
+                # What a version range gives: one resource per version
+                [PSCustomObject]@{ Name = $n; Version = [version]'5.6.0' }
+                [PSCustomObject]@{ Name = $n; Version = [version]'5.7.1' }
+                [PSCustomObject]@{ Name = $n; Version = [version]'5.7.0' }
+            }
+            'nothing' {
+                # What a version range gives when nothing lies in it: no result, no error
             }
             'notfound' {
                 Write-Error -ErrorId 'PackageNotFound' -Category ObjectNotFound `
@@ -68,6 +79,7 @@ function Find-PSResource {
 
 function Reset-Test {
     $script:FindCalls = @()
+    $script:FindVersions = @()
     $script:LogLines = @()
 }
 
@@ -202,6 +214,34 @@ $script:Outcome = { 'ok' }
 $r = Find-GalleryModules -Name ($names + $probe) -RetryDelaySeconds 0, 0
 Assert-That (($r.Resources.Count -eq 6) -and ($r.Unchecked.Count -eq 0)) 'the probe module in the installed list comes back once, as a normal result'
 
+# --- Looking up a version range ------------------------------------------------------
+Write-Section 'Find-GalleryModules: a version range'
+Reset-Test
+$script:Outcome = { param($n) if ($n -eq $probe) { 'ok' } else { 'several' } }
+$r = Find-GalleryModules -Name 'Contoso.Tools' -Version '[5.0.0.0, 6.0.0.0)' -RetryDelaySeconds 0, 0
+Assert-That ($r.Resources.Count -eq 3) "every version in the range comes back (got $($r.Resources.Count))"
+Assert-That ($r.Unchecked.Count -eq 0) 'nothing unchecked'
+Assert-That ($script:FindVersions[1] -eq '[5.0.0.0, 6.0.0.0)') 'the range is handed to the lookup as written'
+Assert-That ([string]::IsNullOrEmpty($script:FindVersions[0])) 'the probe is asked without a range'
+
+Reset-Test
+$script:Outcome = { param($n) if ($n -eq $probe) { 'ok' } else { 'nothing' } }
+$r = Find-GalleryModules -Name 'Contoso.Tools' -Version '[3.0.0.0, 4.0.0.0)' -RetryDelaySeconds 0, 0
+Assert-That (($r.Resources.Count -eq 0) -and ($r.Unchecked.Count -eq 0)) 'an empty range is an answer, not a fault'
+Assert-That ($script:FindCalls.Count -eq 2) 'and is not retried'
+Assert-That ($script:LogLines.Count -eq 0) 'nothing logged'
+
+Reset-Test
+$script:Outcome = { param($n) if ($n -eq $probe) { 'ok' } else { 'network' } }
+$r = Find-GalleryModules -Name 'Contoso.Tools' -Version '[5.0.0.0, 6.0.0.0)' -RetryDelaySeconds 0, 0
+Assert-That (($r.Unchecked -join ',') -eq 'Contoso.Tools') 'a range that gets no answer is reported as unchecked'
+Assert-That ($r.Fault -eq 'No such host is known') "with the fault: '$($r.Fault)'"
+
+Reset-Test
+$script:Outcome = { 'ok' }
+$null = Find-GalleryModules -Name $names -RetryDelaySeconds 0, 0
+Assert-That (@($script:FindVersions | Where-Object { $_ }).Count -eq 0) 'without -Version no range is sent at all'
+
 # --- Get-GalleryFaultText ------------------------------------------------------------
 Write-Section 'Get-GalleryFaultText'
 $long = 'x' * 400
@@ -218,6 +258,8 @@ function New-Summary {
         ModulesFailed = @(); VersionsPruned = 0; PrunesFailed = @(); ExcludedModules = @()
         PinnedModules = @{}; PinsSatisfied = 0; PinsEnforced = 0; PinsFailed = @()
         PinsHoldingBack = @()
+        KeepVersions = @{}; KeepVersionsMatched = @(); KeepVersionsUnmatched = @()
+        KeepLinesUpdated = @(); KeepLinesUnchecked = @()
     }
 }
 
@@ -278,5 +320,53 @@ $script:LogLines = @()
 Send-ToastNotification -Summary (New-Summary)
 $toastLine = $script:LogLines | Where-Object { $_ -like '*Toast notification sent*' }
 Assert-That ($toastLine -like '*Updated 0 modules. Pruned 0 versions. No issues.*') "toast, clean run unchanged: $toastLine"
+
+# --- Reporting kept version lines ----------------------------------------------------
+Write-Section 'Reporting kept version lines'
+
+$lines = New-Summary
+$lines.KeepLinesUnchecked += @{ Module = 'Contoso.Tools'; Line = '5'; Fault = 'No such host is known' }
+$lines.KeepLinesUnchecked += @{ Module = 'Fabrikam.Core'; Line = '2'; Fault = 'No such host is known' }
+$f = Get-SummaryFailures -Summary $lines
+Assert-That (($f.Lookups -eq 1) -and ($f.Total -eq 1)) "two kept lines without an answer are one failure (total $($f.Total))"
+
+$both = New-Summary
+$both.ModulesUnchecked = 150
+$both.KeepLinesUnchecked += @{ Module = 'Contoso.Tools'; Line = '5'; Fault = 'No such host is known' }
+Assert-That ((Get-SummaryFailures -Summary $both).Total -eq 1) 'together with an outage it is still one'
+
+$body = Format-HealthchecksBody -Summary $lines -Mode 'Full' -IsFailure
+Assert-That ($body -like '*lookup: 2 kept line(s) not checked: No such host is known*') 'ping body: names the kept lines'
+Assert-That ($body -like '*Issues: 1*') 'ping body: as one issue'
+
+$script:LogLines = @()
+Send-ToastNotification -Summary $lines
+$toastLine = $script:LogLines | Where-Object { $_ -like '*Toast notification sent*' }
+Assert-That ($toastLine -like '*Updated 0 modules, 2 kept line(s) not checked.*') "toast: $toastLine"
+Assert-That ($toastLine -notlike '*No issues*') 'toast: does not say "No issues"'
+
+# A kept line whose update did not succeed is an update like any other
+$lineUpdate = New-Summary
+$lineUpdate.ModulesFailed += @{ Module = 'Contoso.Tools'; Version = '5.7.1'; Line = '5'; Error = 'Access denied' }
+$f = Get-SummaryFailures -Summary $lineUpdate
+Assert-That (($f.Updates -eq 1) -and ($f.Total -eq 1)) 'a kept line that could not be updated counts as an update'
+$body = Format-HealthchecksBody -Summary $lineUpdate -Mode 'Full' -IsFailure
+Assert-That ($body -like '*- update Contoso.Tools (kept line 5): Access denied*') 'ping body: says which line'
+
+$plainUpdate = New-Summary
+$plainUpdate.ModulesFailed += @{ Module = 'Contoso.Tools'; Error = 'Access denied' }
+$body = Format-HealthchecksBody -Summary $plainUpdate -Mode 'Full' -IsFailure
+Assert-That ($body -like '*- update Contoso.Tools: Access denied*') 'ping body: an ordinary update reads as before'
+
+# A selector that matches nothing installed is a line in the log and nothing else
+$unmatched = New-Summary
+$unmatched.KeepVersionsUnmatched += @{ Module = 'Contoso.Tools'; Selector = '4' }
+Assert-That ((Get-SummaryFailures -Summary $unmatched).Total -eq 0) 'a selector that matches nothing is not a failure'
+$body = Format-HealthchecksBody -Summary $unmatched -Mode 'Full'
+Assert-That ($body -like '*Issues: none*') 'ping body: no issue'
+$script:LogLines = @()
+Send-ToastNotification -Summary $unmatched
+$toastLine = $script:LogLines | Where-Object { $_ -like '*Toast notification sent*' }
+Assert-That ($toastLine -like '*No issues.*') 'toast: still says "No issues"'
 
 Complete-Tests

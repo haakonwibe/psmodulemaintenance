@@ -10,6 +10,7 @@ Automated PowerShell module maintenance for Windows. Updates all PSResourceGet-m
 - 📋 **Comprehensive Logging** — Structured logs with transcripts and JSON summaries
 - ⚙️ **Configurable Exclusions** — Skip specific modules via config file
 - 📌 **Version Pinning** — Hold specific modules at a chosen version instead of updating them
+- 🪜 **Side-by-Side Version Lines** — Keep an older major version next to the newest one, each updated within its own line
 - ⏰ **Scheduled Execution** — Runs weekly via Windows Task Scheduler
 - 🔔 **Toast Notifications** — Optional Windows toast notifications after each run
 - 🛡️ **Per-Module Timeout** — Each module update runs in an isolated runspace with a configurable timeout, preventing one slow module from blocking the entire run
@@ -49,6 +50,9 @@ For example, to exclude or pin specific modules:
   ],
   "PinnedModules": {
     "Az.Accounts": "2.19.0"
+  },
+  "KeepVersions": {
+    "Pester": ["5"]
   },
   "LogRetentionDays": 180,
   "TrustPSGallery": true,
@@ -130,6 +134,7 @@ Run the maintenance script directly:
 |---------|------|---------|-------------|
 | `ExcludedModules` | string[] | `[]` | Module names to skip during updates and pruning |
 | `PinnedModules` | object | `{}` | Module name → exact version to hold (see [Version Pinning](#version-pinning)) |
+| `KeepVersions` | object | `{}` | Module name → older version lines to keep and update next to the newest (see [Keeping an Older Version Line](#keeping-an-older-version-line)) |
 | `LogRetentionDays` | int | `180` | Days to keep log files before auto-cleanup |
 | `TrustPSGallery` | bool | `true` | Trust PSGallery during updates (avoids prompts) |
 | `NotificationMode` | string | `"Always"` | Toast notifications: `"Always"`, `"OnFailure"`, or `"Never"` |
@@ -187,6 +192,71 @@ A run with `"PSWriteColor": "1.0.2"` pinned while 1.0.3 is installed logs:
 - **If the pinned version can't be installed** (wrong version number, gallery unreachable), pruning leaves *all* installed versions of that module in place rather than deleting the ones you have. You'll see a `WARN` in the log and a `PinsFailed` entry in the summary.
 - **`ExcludedModules` wins over a pin.** Listing a module in both is contradictory — exclusion means "never touch this", so the pin is dropped with a warning. Use exclusion when you want a module left entirely alone, including its old versions; use a pin when you want one specific version kept and the rest cleaned up.
 - Pins are enforced during the update phase, so `-PruneOnly` skips enforcement but still prunes pin-aware.
+
+## Keeping an Older Version Line
+
+Some modules make a breaking change between major versions, and you need both for a while:
+the old one for what has not been moved over yet, the new one for everything else. Pester
+5 and 6 are a typical pair.
+
+`KeepVersions` keeps an older version line installed next to the newest version. The
+module is updated as normal, and the kept line is updated too, within itself.
+
+```json
+{
+  "KeepVersions": {
+    "Pester": ["5"]
+  }
+}
+```
+
+| You want | Use |
+|----------|-----|
+| A module left entirely alone | `ExcludedModules` |
+| One version, and nothing newer | `PinnedModules` |
+| The newest version **and** an older line, both kept current | `KeepVersions` |
+
+For each module listed the script:
+
+1. **Updates the module as normal** — the newest version moves on, 6.0.0 to 6.1.0
+2. **Updates each kept line within itself** — a newer release inside the line is installed next to it, 5.5.0 to 5.6.1. A line never moves into the next one
+3. **Keeps the newest version of each line when pruning** — and removes the older ones in that line, as it does everywhere else
+
+```
+[INFO] Checking kept version lines of 1 module(s) for updates...
+[INFO] Updating kept line 5 of Pester: 5.5.0 -> 5.6.1
+[SUCCESS] Updated kept line 5 of Pester to 5.6.1 (took 3s)
+[INFO] Kept line updates complete. Updated: 1, Unsuccessful: 0, Not checked: 0
+...
+[INFO] Keeping Pester v5.6.1 (KeepVersions: 5)
+[INFO] Removing: Pester v5.5.0
+[SUCCESS] Removed: Pester v5.5.0
+```
+
+### What a line is
+
+A selector is the start of a version number. It names every version that begins with it.
+
+| Selector | Covers | Updated to |
+|----------|--------|------------|
+| `"5"` | 5.0.0, 5.7.1, 5.12.3 | The newest 5.x.y |
+| `"5.7"` | 5.7.0, 5.7.4 | The newest 5.7.x |
+| `"5.7.1"` | 5.7.1 and its four-part builds | The newest 5.7.1.x |
+| `"5.7.1.0"` | That one version | Never updated, only kept |
+
+Numbers are compared one by one, so `"1"` does not cover 12.4.0.
+
+### Rules and edge cases
+
+- **Write selectors in quotes.** JSON reads an unquoted `5.10` as the number 5.1, which is a different line. Anything that is not a quoted version prefix is ignored with a warning.
+- **A line is only maintained once you have a version of it.** If nothing installed matches a selector, the log warns and nothing else happens: the script never brings a line onto a machine that does not have it, and the run still counts as successful. Install a version of the line yourself once, and it is kept current from then on.
+- **Only stable releases are installed.** A prerelease you installed yourself is kept like any other version, but a line update never picks one.
+- **Two selectors can overlap.** With `["5", "5.7"]` the 5 line moves to the newest 5.x.y and the 5.7 line to the newest 5.7.x, and both results stay.
+- **A selector for the newest line changes nothing.** `"6"` while 6 is the newest major is already covered by the normal update.
+- **`ExcludedModules` wins.** A module listed in both is left alone and its `KeepVersions` entry is ignored with a warning.
+- **Pinning and keeping combine.** The pin holds the module's main version, and the kept lines are maintained beside it. If the pinned version lies inside a kept line, the pin decides and that line is not updated.
+- **A line that could not be updated is reported like any other update**, in the log, the toast and the Healthchecks ping. So is a line lookup that PSGallery did not answer.
+- Lines are updated during the update phase, so `-PruneOnly` skips that but still keeps them when pruning.
 
 ## Notifications
 
@@ -314,13 +384,24 @@ C:\ProgramData\PSModuleMaintenance\Logs\
   "PinsFailed": [],
   "PinsHoldingBack": [
     { "Module": "Pester", "Pinned": "5.7.1", "Available": "6.0.1" }
-  ]
+  ],
+  "KeepVersions": { "PSReadLine": ["2"] },
+  "KeepVersionsMatched": [
+    { "Module": "PSReadLine", "Selector": "2", "Version": "2.3.6" }
+  ],
+  "KeepVersionsUnmatched": [],
+  "KeepLinesUpdated": [
+    { "Module": "PSReadLine", "Line": "2", "From": "2.3.5", "To": "2.3.6" }
+  ],
+  "KeepLinesUnchecked": []
 }
 ```
 
 `PinsSatisfied` counts modules already on their pinned version, `PinsEnforced` counts pins this run had to install, and `PinsHoldingBack` lists the newer releases each pin is declining — useful for periodically reviewing whether a pin is still needed.
 
 `ModulesUnchecked` counts installed modules that PSGallery gave no answer for, with the reason in `GalleryFault`. Any non-zero value is reported as a single failure. `ModulesChecked` excludes them, so an unreachable gallery reads `"ModulesChecked": 0` rather than looking like a full check that found nothing. A module that simply is not on PSGallery counts as checked.
+
+`KeepVersionsMatched` lists the version each kept line resolved to, and `KeepLinesUpdated` the lines that were moved forward this run. `KeepVersionsUnmatched` holds selectors that matched nothing installed; that is a warning in the log, not a failure. `KeepLinesUnchecked` holds lines PSGallery gave no answer for, which does count, together with `ModulesUnchecked`, as a single failure.
 
 ## Uninstall
 
@@ -410,8 +491,8 @@ nothing to configure. The weekly log notes them without raising a warning:
 3. **Resolve Monitoring Secret** — Reads the Healthchecks ping URL from the vault and sends a start ping. Done before any module work, because the script prunes `SecretManagement` itself
 4. **Self-Check** — Warns if the scheduled task launches a hard-coded interpreter path that a PowerShell reinstall would break
 5. **Clean Old Logs** — Removes logs older than retention period
-6. **Update Modules** — Bulk checks PSGallery for available updates, then updates each module in an isolated runspace with a per-module timeout (targets AllUsers scope when OneDrive is detected). Transient network faults are retried; timeouts are not. If PSGallery cannot be reached at all, the run is reported as unsuccessful instead of as up to date
-7. **Prune Versions** — Groups modules by name, keeps newest, removes the rest (skips built-in modules like PackageManagement). When OneDrive is detected and modules installed by PSResourceGet are found in the CurrentUser path, logs a warning to run `Invoke-OneDriveMigration.ps1`. Modules another program put there are left alone
+6. **Update Modules** — Bulk checks PSGallery for available updates, then updates each module in an isolated runspace with a per-module timeout (targets AllUsers scope when OneDrive is detected). Transient network faults are retried; timeouts are not. If PSGallery cannot be reached at all, the run is reported as unsuccessful instead of as up to date. Version lines listed in `KeepVersions` are updated within themselves first
+7. **Prune Versions** — Groups modules by name, keeps newest (or the pin) and the newest version of each kept line, removes the rest (skips built-in modules like PackageManagement). When OneDrive is detected and modules installed by PSResourceGet are found in the CurrentUser path, logs a warning to run `Invoke-OneDriveMigration.ps1`. Modules another program put there are left alone
 8. **Save Summary** — Writes JSON summary after each phase (incremental saves protect against process termination)
 9. **Toast Notification** — Shows a Windows toast with the run summary (if enabled via `NotificationMode`)
 10. **Healthchecks Ping** — Sends a success or fail ping with the run summary as the body (if enabled)
@@ -566,7 +647,8 @@ stand in only for the calls that would touch the network or the machine.
 | `Test-Retry.ps1` | Which errors count as a network fault, and how an update is retried |
 | `Test-GalleryLookup.ps1` | The PSGallery lookup, and how an incomplete one is reported in the log, the toast and the ping |
 | `Test-ModuleOwnership.ps1` | Telling modules installed by PSResourceGet from another program's, and finding a version on disk |
-| `Test-Config.ps1` | That `config.example.json` is valid, matches the built-in defaults, and that a missing `config.json` is fine |
+| `Test-Config.ps1` | That `config.example.json` is valid, matches the built-in defaults, and that a missing `config.json` is fine. Loading `KeepVersions` |
+| `Test-KeepVersions.ps1` | Version lines: what a selector covers, what is kept and what is pruned, which lines are updated and to what |
 
 ## Contributing
 

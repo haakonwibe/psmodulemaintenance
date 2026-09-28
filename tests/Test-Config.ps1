@@ -37,7 +37,8 @@ function Reset-Config {
 }
 
 $wanted = 'ConvertTo-NormalizedVersion', 'Get-ModuleVersionKey', 'ConvertFrom-PinnedVersionString',
-          'ConvertTo-PinnedModuleTable', 'Import-MaintenanceConfig'
+          'ConvertTo-PinnedModuleTable', 'ConvertFrom-KeepVersionSelector', 'ConvertTo-KeepVersionTable',
+          'Import-MaintenanceConfig'
 foreach ($name in $wanted) {
     . ([scriptblock]::Create((Get-ScriptFunctionText -Path $script:MainScript -Name $name)))
 }
@@ -60,6 +61,7 @@ Assert-That $valid 'it validates against config.schema.json'
 Assert-That ($example.Healthchecks.Enabled -eq $false) 'Healthchecks is off'
 Assert-That (@($example.ExcludedModules).Count -eq 0) 'no module is excluded'
 Assert-That (@($example.PinnedModules.PSObject.Properties).Count -eq 0) 'no module is pinned'
+Assert-That (@($example.KeepVersions.PSObject.Properties).Count -eq 0) 'no version is kept'
 Assert-That ($raw -notmatch 'hc-ping\.com|healthchecks\.io/ping') 'it holds no ping URL'
 
 # --- The template against the built-in defaults --------------------------------------
@@ -80,6 +82,7 @@ foreach ($key in 'Enabled', 'SecretName', 'SecretVault', 'TimeoutSeconds') {
 }
 Assert-That (@($loaded.ExcludedModules).Count -eq 0) 'ExcludedModules loads as empty'
 Assert-That ($loaded.PinnedModules.Count -eq 0) 'PinnedModules loads as empty'
+Assert-That ($loaded.KeepVersions.Count -eq 0) 'KeepVersions loads as empty'
 Assert-That ($script:ConfigWarnings.Count -eq 0) 'loading it raises no warning'
 
 $templateKeys = @($example.PSObject.Properties.Name | Where-Object { $_ -notin '$schema', '_comment' } | Sort-Object)
@@ -96,6 +99,66 @@ try { Import-MaintenanceConfig -Path $missing } catch { $threw = $true }
 Assert-That (-not $threw) 'a missing file is not an error'
 Assert-That ($script:Config.Healthchecks.Enabled -eq $false) 'Healthchecks stays off'
 Assert-That ($script:Config.ModuleUpdateTimeoutSeconds -eq $defaults.ModuleUpdateTimeoutSeconds) 'the defaults are in force'
+
+# --- Loading KeepVersions ------------------------------------------------------------
+Write-Section 'Loading KeepVersions'
+
+$configFolder = Join-Path ([System.IO.Path]::GetTempPath()) ('PSModuleMaintenance-tests-' + [guid]::NewGuid().ToString('N'))
+New-Item -Path $configFolder -ItemType Directory -Force | Out-Null
+
+# Writes the text to a config file and loads it over fresh defaults
+function Import-TestConfig {
+    param([string]$Json)
+
+    $path = Join-Path $configFolder 'config.json'
+    Set-Content -LiteralPath $path -Value $Json
+    Reset-Config
+    Import-MaintenanceConfig -Path $path 3>$null
+}
+
+try {
+    Import-TestConfig '{ "KeepVersions": { "Contoso.Tools": ["5", "5.7"] } }'
+    $kept = @($script:Config.KeepVersions['Contoso.Tools'])
+    Assert-That ($script:Config.KeepVersions.Count -eq 1) 'a valid entry loads'
+    Assert-That (($kept.Count -eq 2) -and ($kept[0].Requested -eq '5') -and ($kept[1].Requested -eq '5.7')) 'both selectors are there, in order'
+    Assert-That (($kept[1].Parts -join ',') -eq '5,7') 'a selector is parsed into its numbers'
+    Assert-That ($script:ConfigWarnings.Count -eq 0) 'without a warning'
+    Assert-That ($script:Config.KeepVersions.ContainsKey('contoso.tools')) 'the module name is looked up without regard to case'
+
+    Import-TestConfig '{ "KeepVersions": { "Contoso.Tools": ["5", "5.*", "5"] } }'
+    $kept = @($script:Config.KeepVersions['Contoso.Tools'])
+    Assert-That (($kept.Count -eq 1) -and ($kept[0].Requested -eq '5')) 'a bad selector is dropped, its sibling stays, a repeat counts once'
+    Assert-That (@($script:ConfigWarnings | Where-Object { $_ -like "*'5.*' is not a version prefix*" }).Count -eq 1) 'the bad selector is reported'
+
+    # Unquoted, 5.10 reaches the script as the number 5.1 and would select the wrong line
+    Import-TestConfig '{ "KeepVersions": { "Contoso.Tools": [5.10] } }'
+    Assert-That ($script:Config.KeepVersions.Count -eq 0) 'a number is rejected'
+    Assert-That (@($script:ConfigWarnings | Where-Object { $_ -like '*has to be a string in quotes*' }).Count -eq 1) 'and reported'
+    Assert-That (@($script:ConfigWarnings | Where-Object { $_ -like '*holds no usable selector*' }).Count -eq 1) 'an entry left with nothing is reported too'
+
+    Import-TestConfig '{ "KeepVersions": { "Contoso.Tools": "5" } }'
+    $kept = @($script:Config.KeepVersions['Contoso.Tools'])
+    Assert-That (($kept.Count -eq 1) -and ($kept[0].Requested -eq '5')) 'a single value without the list brackets is accepted'
+
+    Import-TestConfig '{ "ExcludedModules": ["Contoso.Tools"], "KeepVersions": { "contoso.tools": ["5"], "Fabrikam.Core": ["2"] } }'
+    Assert-That (-not $script:Config.KeepVersions.ContainsKey('Contoso.Tools')) 'an excluded module loses its KeepVersions entry'
+    Assert-That ($script:Config.KeepVersions.ContainsKey('Fabrikam.Core')) 'other entries stay'
+    Assert-That (@($script:ConfigWarnings | Where-Object { $_ -like '*both excluded and listed in KeepVersions*' }).Count -eq 1) 'the conflict is reported'
+
+    Import-TestConfig '{ "PinnedModules": { "Contoso.Tools": "6.1.0" }, "KeepVersions": { "Contoso.Tools": ["5"] } }'
+    Assert-That (($script:Config.PinnedModules.ContainsKey('Contoso.Tools')) -and ($script:Config.KeepVersions.ContainsKey('Contoso.Tools'))) 'pinning and keeping combine'
+    Assert-That ($script:ConfigWarnings.Count -eq 0) 'without a warning'
+
+    Import-TestConfig '{ "KeepVersions": ["Contoso.Tools"], "LogRetentionDays": 30 }'
+    Assert-That ($script:Config.KeepVersions.Count -eq 0) 'a list where an object belongs is ignored'
+    Assert-That (@($script:ConfigWarnings | Where-Object { $_ -like 'Ignoring KeepVersions: it has to be an object*' }).Count -eq 1) 'and reported'
+    Assert-That ($script:Config.LogRetentionDays -eq 30) 'the rest of that file still loads'
+}
+finally {
+    if (Test-Path -LiteralPath $configFolder) {
+        Remove-Item -LiteralPath $configFolder -Recurse -Force
+    }
+}
 
 # --- config.json stays out of the repository -----------------------------------------
 Write-Section 'config.json is ignored'

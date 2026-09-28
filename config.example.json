@@ -6,6 +6,8 @@
 
   "PinnedModules": {},
 
+  "KeepVersions": {},
+
   "LogRetentionDays": 180,
 
   "TrustPSGallery": true,
