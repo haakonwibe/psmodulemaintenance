@@ -34,6 +34,7 @@ function Get-ScriptAssignmentText {
 function Reset-Config {
     . ([scriptblock]::Create((Get-ScriptAssignmentText -Path $script:MainScript -Variable '$script:Config')))
     $script:ConfigWarnings = @()
+    $script:ConfigFault = $null
 }
 
 $wanted = 'ConvertTo-NormalizedVersion', 'Get-ModuleVersionKey', 'ConvertFrom-PinnedVersionString',
@@ -158,8 +159,22 @@ try {
     Write-Section 'A config file that cannot be read'
 
     Import-TestConfig '{ "ExcludedModules": ["Contoso.Tools"], '
-    Assert-That (@($script:Config.ExcludedModules).Count -eq 0) 'the defaults are in force'
-    Assert-That (@($script:ConfigWarnings | Where-Object { $_ -like 'Could not read the config file*' }).Count -eq 1) 'and the log is told, not only the console'
+    Assert-That (-not [string]::IsNullOrWhiteSpace($script:ConfigFault)) 'the fault is recorded, with its reason, for the main block to act on'
+
+    Import-TestConfig 'not json at all'
+    Assert-That (-not [string]::IsNullOrWhiteSpace($script:ConfigFault)) 'the same for a file that is not JSON'
+
+    Import-TestConfig '{ "LogRetentionDays": 30 }'
+    Assert-That ($null -eq $script:ConfigFault) 'a file that can be read records no fault'
+
+    # An entry that is not understood is a warning about that entry, not an unreadable file
+    Import-TestConfig '{ "KeepVersions": { "Contoso.Tools": ["5.*"] } }'
+    Assert-That (($null -eq $script:ConfigFault) -and ($script:ConfigWarnings.Count -gt 0)) 'a bad entry in a readable file is a warning, not a fault'
+
+    Reset-Config
+    $missing = Join-Path $configFolder 'there-is-no-such-file.json'
+    Import-MaintenanceConfig -Path $missing
+    Assert-That ($null -eq $script:ConfigFault) 'a file that does not exist is not a fault: the defaults are what was asked for'
 }
 finally {
     if (Test-Path -LiteralPath $configFolder) {

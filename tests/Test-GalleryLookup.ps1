@@ -257,7 +257,7 @@ function New-Summary {
         ModulesChecked = 0; ModulesUnchecked = 0; GalleryFault = $null; ModulesUpdated = 0
         ModulesFailed = @(); VersionsPruned = 0; PrunesFailed = @(); ExcludedModules = @()
         PinnedModules = @{}; PinsSatisfied = 0; PinsEnforced = 0; PinsFailed = @()
-        PinsHoldingBack = @()
+        PinsHoldingBack = @(); ConfigFault = $null
         KeepVersions = @{}; KeepVersionsMatched = @(); KeepVersionsUnmatched = @()
         KeepLinesUpdated = @(); KeepLinesUnchecked = @()
     }
@@ -368,5 +368,24 @@ $script:LogLines = @()
 Send-ToastNotification -Summary $unmatched
 $toastLine = $script:LogLines | Where-Object { $_ -like '*Toast notification sent*' }
 Assert-That ($toastLine -like '*No issues.*') 'toast: still says "No issues"'
+
+# --- Reporting a config file that could not be read ----------------------------------
+Write-Section 'Reporting a config file that could not be read'
+
+$fault = New-Summary
+$fault.ConfigFault = 'Unexpected end of text at line 4'
+$f = Get-SummaryFailures -Summary $fault
+Assert-That (($f.Config -eq 1) -and ($f.Total -eq 1)) "it counts as one failure (total $($f.Total))"
+Assert-That ((Get-SummaryFailures -Summary (New-Summary)).Config -eq 0) 'and as none when the file was read'
+
+$body = Format-HealthchecksBody -Summary $fault -Mode 'Full' -IsFailure
+Assert-That ($body -like '*- config: could not be read, so nothing was updated or pruned: Unexpected end of text at line 4*') 'ping body: says what happened, and why'
+Assert-That ($body -like '*Issues: 1*') 'ping body: as one issue'
+
+$script:LogLines = @()
+Send-ToastNotification -Summary $fault
+$toastLine = $script:LogLines | Where-Object { $_ -like '*Toast notification sent*' }
+Assert-That ($toastLine -like '*Toast notification sent: The config file could not be read. Nothing was updated or pruned.') "toast: $toastLine"
+Assert-That ($toastLine -notlike '*Updated 0 modules*') 'toast: does not read like a quiet week'
 
 Complete-Tests

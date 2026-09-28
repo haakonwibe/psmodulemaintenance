@@ -141,13 +141,21 @@ function Get-LogLines {
 }
 
 # The wiring tests call functions that remove and install. Make sure the stand-ins are
-# what they reach, not the real cmdlets
-$safe = ((Get-Command Uninstall-PSResource).CommandType -eq 'Function') -and
-        ((Get-Command Get-PSResource).CommandType -eq 'Function') -and
-        ((Get-Command Invoke-ModuleUpdateWithRetry).CommandType -eq 'Function') -and
-        ((Get-Command Find-GalleryModules).CommandType -eq 'Function')
-if (-not $safe) {
-    throw 'A stand-in is not in place. Stopping before anything real can be called.'
+# what they reach, not the real cmdlets.
+#
+# Get-PSResource needs this more than the others. It is an alias the PSResourceGet module
+# gives Get-InstalledPSResource, and an alias is found before a function. In a session
+# where that module is loaded the stand-in would be passed over and the test would see
+# the modules of the machine it runs on. This process never loads it, and refuses to go
+# on if it finds it loaded
+function Test-StandInsInPlace {
+    ((Get-Command Uninstall-PSResource).CommandType -eq 'Function') -and
+    ((Get-Command Get-PSResource).CommandType -eq 'Function') -and
+    ((Get-Command Invoke-ModuleUpdateWithRetry).CommandType -eq 'Function') -and
+    ((Get-Command Find-GalleryModules).CommandType -eq 'Function')
+}
+if (-not (Test-StandInsInPlace)) {
+    throw 'A stand-in is not in place. Stopping before anything real can be called. Run the tests through Invoke-Tests.ps1, which starts a process without the PSResourceGet module loaded.'
 }
 
 # --- Selector parser -----------------------------------------------------------------
@@ -609,5 +617,11 @@ $script:MainAnswer = $upToDate
 $script:LineAnswer = { param($Name, $Range) New-Answer -Resources @((New-Resource -Name $Name -Version '5.8.0')) }
 Update-AllModules
 Assert-That ($script:InstallCalls.Count -eq 0) 'an excluded module gets no line update'
+
+# --- The stand-ins, once more --------------------------------------------------------
+Write-Section 'Stand-ins'
+
+Assert-That (Test-StandInsInPlace) 'they were still what the functions reached at the end'
+Assert-That ($null -eq (Get-Module Microsoft.PowerShell.PSResourceGet)) 'and the real module was never loaded into this process'
 
 Complete-Tests

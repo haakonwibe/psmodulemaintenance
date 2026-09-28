@@ -80,6 +80,11 @@ $script:Config = @{
 # written to the log once Initialize-Logging has run
 $script:ConfigWarnings = @()
 
+# Why the config file could not be read, if it could not. When this is set the run
+# touches no module at all: without the config it is not known which modules are
+# excluded, pinned or kept, and the built-in defaults would update and prune them all
+$script:ConfigFault = $null
+
 # Healthchecks ping URL, resolved once at startup from the SecretManagement vault.
 # Held in memory for the run and deliberately never written to the log, the transcript
 # or the summary JSON — the ping URL is a bearer secret
@@ -230,12 +235,12 @@ function Import-MaintenanceConfig {
             Write-Verbose "Loaded configuration from: $Path"
         }
         catch {
-            Write-Warning "Failed to parse config file: $_. Using defaults."
+            Write-Warning "Failed to parse config file: $_"
 
             # Write-Warning only reaches the console, and nobody watches the console of a
-            # scheduled task. Without this line a typo in the config would drop every
-            # exclusion, pin and kept version without a trace in the log
-            $script:ConfigWarnings += "Could not read the config file, so the built-in defaults are in use and no module is excluded, pinned or kept: $($_.Exception.Message)"
+            # scheduled task. The main block reads this, writes it to the log and stops
+            # before any module is touched
+            $script:ConfigFault = $_.Exception.Message
         }
     }
     else {
@@ -265,6 +270,7 @@ $script:Summary = @{
     PinsEnforced = 0
     PinsFailed = @()
     PinsHoldingBack = @()
+    ConfigFault = $null
     KeepVersions = @{}
     KeepVersionsMatched = @()
     KeepVersionsUnmatched = @()
@@ -362,12 +368,20 @@ function Get-SummaryFailures {
         shares that one count. A kept line whose update did not succeed is an update like
         any other and sits in ModulesFailed. A KeepVersions selector that matches nothing
         installed is deliberately not counted at all: it only gets a line in the log.
+
+        A config file that could not be read counts as one. Nothing else can have gone
+        wrong in such a run, because it stops before any module is touched.
     #>
     [CmdletBinding()]
     param(
         [Parameter(Mandatory)]
         [hashtable]$Summary
     )
+
+    $config = 0
+    if ($Summary.ConfigFault) {
+        $config = 1
+    }
 
     $lookups = 0
     if (($Summary.ModulesUnchecked -gt 0) -or ($Summary.KeepLinesUnchecked.Count -gt 0)) {
@@ -378,11 +392,12 @@ function Get-SummaryFailures {
     $prunes = $Summary.PrunesFailed.Count
 
     return [PSCustomObject]@{
+        Config  = $config
         Lookups = $lookups
         Updates = $updates
         Pins    = $pins
         Prunes  = $prunes
-        Total   = $lookups + $updates + $pins + $prunes
+        Total   = $config + $lookups + $updates + $pins + $prunes
     }
 }
 
@@ -463,6 +478,11 @@ function Send-ToastNotification {
             $message += ' No issues.'
         }
 
+        if ($Summary.ConfigFault) {
+            # Counts of 0 would read like a quiet week. Say what actually happened
+            $message = 'The config file could not be read. Nothing was updated or pruned.'
+        }
+
         # Use Windows PowerShell (5.1) for native WinRT toast support — always present on Windows 10/11
         $xmlMessage = [System.Security.SecurityElement]::Escape($message)
 
@@ -527,19 +547,63 @@ function Get-HealthchecksUrl {
         Returns $null on any problem instead of throwing. That is the point: no ping
         means the check goes overdue and Healthchecks alerts, so broken monitoring
         surfaces as a notification rather than as silence.
+
+    .PARAMETER WithoutConfig
+        For a run whose config file could not be read. Whether monitoring is switched on
+        is one of the things that file would have said, so this looks for the secret
+        under the name and vault that are in force, which are the built-in defaults, and
+        uses it if it is there. If it is not, that is not a problem worth a warning:
+        monitoring may simply never have been set up.
     #>
     [CmdletBinding()]
-    param()
+    param(
+        [switch]$WithoutConfig
+    )
 
     $hc = $script:Config.Healthchecks
 
-    if (-not $hc.Enabled) {
+    if ((-not $hc.Enabled) -and (-not $WithoutConfig)) {
         Write-Log "Healthchecks monitoring is off"
         return $null
     }
 
     $secretName = $hc.SecretName
     $secretVault = $hc.SecretVault
+
+    if ($WithoutConfig) {
+        $found = $null
+        try {
+            Import-Module Microsoft.PowerShell.SecretManagement -ErrorAction Stop
+
+            $lookupParams = @{
+                Name        = $secretName
+                AsPlainText = $true
+                ErrorAction = 'Stop'
+            }
+            if ($secretVault) { $lookupParams['Vault'] = $secretVault }
+
+            $found = Get-Secret @lookupParams
+        }
+        catch {
+            $found = $null
+        }
+
+        $usable = $null
+        if (-not [string]::IsNullOrWhiteSpace($found)) {
+            $candidate = "$found".Trim().TrimEnd('/')
+            if ($candidate -match '^https?://') {
+                $usable = $candidate
+            }
+        }
+
+        if ($usable) {
+            Write-Log "Healthchecks secret found under its default name '$secretName' - this run will be reported"
+        }
+        else {
+            Write-Log "No usable Healthchecks secret under the default name '$secretName' - this run will not be reported there"
+        }
+        return $usable
+    }
 
     try {
         Import-Module Microsoft.PowerShell.SecretManagement -ErrorAction Stop
@@ -624,6 +688,9 @@ function Format-HealthchecksBody {
     )
 
     $issues = @()
+    if ($Summary.ConfigFault) {
+        $issues += "  - config: could not be read, so nothing was updated or pruned: $($Summary.ConfigFault)"
+    }
     if ($Summary.ModulesUnchecked -gt 0) {
         $issues += "  - lookup: $($Summary.ModulesUnchecked) module(s) not checked: $($Summary.GalleryFault)"
     }
@@ -2624,49 +2691,65 @@ try {
         Write-Log $configWarning -Level WARN
     }
 
-    # Record the effective pins in the summary (name -> version) so they show up even for -PruneOnly
-    foreach ($pinName in $script:Config.PinnedModules.Keys) {
-        $script:Summary.PinnedModules[$pinName] = $script:Config.PinnedModules[$pinName].Requested
+    if ($script:ConfigFault) {
+        # A config file that is there but cannot be read. Going on would mean running on
+        # the built-in defaults, under which nothing is excluded, pinned or kept: every
+        # module would be updated and every old version pruned, including the ones the
+        # file was written to protect. So this run touches no module, and no log either,
+        # since how long logs are kept is in that file too
+        $script:Summary.ConfigFault = $script:ConfigFault
+        Write-Log "Could not read the config file: $($script:ConfigFault)" -Level ERROR
+        Write-Log "Nothing was updated or pruned. Without the config it is not known which modules are excluded, pinned or kept" -Level ERROR
+
+        # Whether monitoring is on is in that file as well. Look for the secret anyway,
+        # so that this is heard about today and not when the check goes overdue
+        $script:HealthchecksUrl = Get-HealthchecksUrl -WithoutConfig
     }
+    else {
+        # Record the effective pins in the summary (name -> version) so they show up even for -PruneOnly
+        foreach ($pinName in $script:Config.PinnedModules.Keys) {
+            $script:Summary.PinnedModules[$pinName] = $script:Config.PinnedModules[$pinName].Requested
+        }
 
-    # The same for the kept version lines (name -> list of selectors as written)
-    foreach ($keepName in $script:Config.KeepVersions.Keys) {
-        $script:Summary.KeepVersions[$keepName] = @($script:Config.KeepVersions[$keepName] |
-            ForEach-Object { $_.Requested })
-    }
+        # The same for the kept version lines (name -> list of selectors as written)
+        foreach ($keepName in $script:Config.KeepVersions.Keys) {
+            $script:Summary.KeepVersions[$keepName] = @($script:Config.KeepVersions[$keepName] |
+                ForEach-Object { $_.Requested })
+        }
 
-    # Log configuration
-    Write-Log "Configuration loaded:"
-    Write-Log "  - Excluded modules: $($script:Config.ExcludedModules.Count)"
-    Write-Log "  - Pinned modules: $($script:Config.PinnedModules.Count)"
-    Write-Log "  - Modules with kept versions: $($script:Config.KeepVersions.Count)"
-    Write-Log "  - Log retention: $($script:Config.LogRetentionDays) days"
-    Write-Log "  - Trust PSGallery: $($script:Config.TrustPSGallery)"
-    Write-Log "  - Notification mode: $($script:Config.NotificationMode)"
-    Write-Log "  - Module update timeout: $($script:Config.ModuleUpdateTimeoutSeconds)s"
-    $hcEnabled = $script:Config.Healthchecks.Enabled
-    Write-Log "  - Healthchecks monitoring: $hcEnabled"
+        # Log configuration
+        Write-Log "Configuration loaded:"
+        Write-Log "  - Excluded modules: $($script:Config.ExcludedModules.Count)"
+        Write-Log "  - Pinned modules: $($script:Config.PinnedModules.Count)"
+        Write-Log "  - Modules with kept versions: $($script:Config.KeepVersions.Count)"
+        Write-Log "  - Log retention: $($script:Config.LogRetentionDays) days"
+        Write-Log "  - Trust PSGallery: $($script:Config.TrustPSGallery)"
+        Write-Log "  - Notification mode: $($script:Config.NotificationMode)"
+        Write-Log "  - Module update timeout: $($script:Config.ModuleUpdateTimeoutSeconds)s"
+        $hcEnabled = $script:Config.Healthchecks.Enabled
+        Write-Log "  - Healthchecks monitoring: $hcEnabled"
 
-    # Resolve the ping URL before any update or prune work — this script prunes
-    # SecretManagement itself, so the secret is read while the module is still loadable
-    $script:HealthchecksUrl = Get-HealthchecksUrl
-    Send-HealthchecksPing -PingType Start
+        # Resolve the ping URL before any update or prune work — this script prunes
+        # SecretManagement itself, so the secret is read while the module is still loadable
+        $script:HealthchecksUrl = Get-HealthchecksUrl
+        Send-HealthchecksPing -PingType Start
 
-    # Flag a fragile task registration while the script can still be heard
-    Test-ScheduledTaskHealth
+        # Flag a fragile task registration while the script can still be heard
+        Test-ScheduledTaskHealth
 
-    # Clean up old logs
-    Remove-OldLogs -BasePath $LogPath -RetentionDays $script:Config.LogRetentionDays
+        # Clean up old logs
+        Remove-OldLogs -BasePath $LogPath -RetentionDays $script:Config.LogRetentionDays
 
-    # Perform operations — save summary after each phase so state is preserved if the process is killed
-    if (-not $PruneOnly) {
-        Update-AllModules
-        Save-Summary -BasePath $LogPath
-    }
+        # Perform operations — save summary after each phase so state is preserved if the process is killed
+        if (-not $PruneOnly) {
+            Update-AllModules
+            Save-Summary -BasePath $LogPath
+        }
 
-    if (-not $UpdateOnly) {
-        Remove-OldModuleVersions
-        Save-Summary -BasePath $LogPath
+        if (-not $UpdateOnly) {
+            Remove-OldModuleVersions
+            Save-Summary -BasePath $LogPath
+        }
     }
 
     # The closing line has to agree with the toast and the ping. It used to claim success
@@ -2677,11 +2760,12 @@ try {
     Write-Log "======================================================"
     if ($failures.Total -gt 0) {
         $failureCount = $failures.Total
+        $configFailed = $failures.Config
         $lookupsFailed = $failures.Lookups
         $updatesFailed = $failures.Updates
         $pinsFailed = $failures.Pins
         $prunesFailed = $failures.Prunes
-        Write-Log "PSModuleMaintenance completed with $failureCount unsuccessful operation(s) (lookups: $lookupsFailed, updates: $updatesFailed, pins: $pinsFailed, prunes: $prunesFailed)" -Level WARN
+        Write-Log "PSModuleMaintenance completed with $failureCount unsuccessful operation(s) (config: $configFailed, lookups: $lookupsFailed, updates: $updatesFailed, pins: $pinsFailed, prunes: $prunesFailed)" -Level WARN
     }
     else {
         Write-Log "PSModuleMaintenance completed successfully" -Level SUCCESS

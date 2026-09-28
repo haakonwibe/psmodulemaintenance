@@ -152,6 +152,40 @@ Run the maintenance script directly:
 
 **The ping URL is never stored in `config.json`** — it is a bearer secret, and a plain-text settings file is too easily copied, synced or shared.
 
+### If `config.json` cannot be read
+
+A `config.json` that is there but cannot be read, because of a typo or a half-saved edit,
+stops the run before it touches anything. **No module is updated and no version is pruned.**
+
+Going on would mean running on the built-in defaults, under which nothing is excluded,
+pinned or kept. Every module would be updated and every old version removed, including the
+ones the file was written to protect. Old logs are left alone too, since how long to keep
+them is set in the same file.
+
+```
+[ERROR] Could not read the config file: <reason>
+[ERROR] Nothing was updated or pruned. Without the config it is not known which modules are excluded, pinned or kept
+[WARN] PSModuleMaintenance completed with 1 unsuccessful operation(s) (config: 1, lookups: 0, updates: 0, pins: 0, prunes: 0)
+```
+
+The run is reported as unsuccessful everywhere it can be heard:
+
+- **Toast:** "The config file could not be read. Nothing was updated or pruned."
+- **Healthchecks:** whether monitoring is on is one of the things the file would have said.
+  The script looks for the ping URL under the default secret name anyway and, if it is
+  there, sends a fail ping with the reason.
+
+Fix the file and run the task again. To check a file after editing it:
+
+```powershell
+Test-Json -Path .\config.json -SchemaFile .\config.schema.json
+```
+
+A `config.json` that does not exist is a different matter and not a problem: the script
+then runs on the built-in defaults, as it always has. So is a single entry that is not
+understood, such as a pin with an impossible version. That is logged as a warning, the
+entry is ignored and the run goes on.
+
 ## Version Pinning
 
 Pinning holds a module at one specific version. Use it when a newer release breaks something and you need that module to stay put while everything else keeps updating.
@@ -337,7 +371,8 @@ The body includes the machine name so one account can cover several machines, bu
 deliberately omits the user and domain — the body is embedded in alert emails, chat
 messages and webhook payloads.
 
-Any non-empty `ModulesFailed`, `PrunesFailed`, or `PinsFailed` sends a fail ping, and so
+Any non-empty `ModulesFailed`, `PrunesFailed`, or `PinsFailed` sends a fail ping, as does a
+`config.json` that could not be read, and so
 does a non-zero `ModulesUnchecked` — a run that could not reach PSGallery has not checked
 anything, so it must not reset the timer. It is the same rule as
 `NotificationMode: OnFailure`, so the two channels never disagree.
@@ -385,6 +420,7 @@ C:\ProgramData\PSModuleMaintenance\Logs\
   "PinsHoldingBack": [
     { "Module": "Pester", "Pinned": "5.7.1", "Available": "6.0.1" }
   ],
+  "ConfigFault": null,
   "KeepVersions": { "PSReadLine": ["2"] },
   "KeepVersionsMatched": [
     { "Module": "PSReadLine", "Selector": "2", "Version": "2.3.6" }
@@ -400,6 +436,8 @@ C:\ProgramData\PSModuleMaintenance\Logs\
 `PinsSatisfied` counts modules already on their pinned version, `PinsEnforced` counts pins this run had to install, and `PinsHoldingBack` lists the newer releases each pin is declining — useful for periodically reviewing whether a pin is still needed.
 
 `ModulesUnchecked` counts installed modules that PSGallery gave no answer for, with the reason in `GalleryFault`. Any non-zero value is reported as a single failure. `ModulesChecked` excludes them, so an unreachable gallery reads `"ModulesChecked": 0` rather than looking like a full check that found nothing. A module that simply is not on PSGallery counts as checked.
+
+`ConfigFault` holds the reason when `config.json` could not be read, and is `null` otherwise. When it is set, every count in the summary is zero, because the run stopped before touching anything.
 
 `KeepVersionsMatched` lists the version each kept line resolved to, and `KeepLinesUpdated` the lines that were moved forward this run. `KeepVersionsUnmatched` holds selectors that matched nothing installed; that is a warning in the log, not a failure. `KeepLinesUnchecked` holds lines PSGallery gave no answer for, which does count, together with `ModulesUnchecked`, as a single failure.
 
@@ -568,7 +606,7 @@ A module that succeeds on a later attempt counts as a normal success. Only a mod
 fails all three attempts is reported as unsuccessful, and the run then ends with:
 
 ```
-[WARN] PSModuleMaintenance completed with 1 unsuccessful operation(s) (lookups: 0, updates: 1, pins: 0, prunes: 0)
+[WARN] PSModuleMaintenance completed with 1 unsuccessful operation(s) (config: 0, lookups: 0, updates: 1, pins: 0, prunes: 0)
 ```
 
 This matters most on laptops: the task uses `StartWhenAvailable`, so a missed 03:00 run
@@ -584,7 +622,7 @@ everything is up to date:
 [WARN] PSGallery gave no answer for 150 module(s) (attempt 1 of 3): No such host is known. Retrying in 5s
 [WARN] PSGallery gave no answer for 150 module(s) (attempt 2 of 3): No such host is known. Retrying in 15s
 [ERROR] Could not reach PSGallery, so none of the 150 installed modules were checked for updates: ...
-[WARN] PSModuleMaintenance completed with 1 unsuccessful operation(s) (lookups: 1, updates: 0, pins: 0, prunes: 0)
+[WARN] PSModuleMaintenance completed with 1 unsuccessful operation(s) (config: 0, lookups: 1, updates: 0, pins: 0, prunes: 0)
 ```
 
 An outage counts as one unsuccessful operation, not one per module. The number of modules
@@ -640,14 +678,17 @@ no ping, and only write to a temp folder that they remove again.
 They cover the parts a normal run almost never reaches: what happens when the network
 drops, when PSGallery cannot be reached, and when a module belongs to another program.
 They run the real functions, lifted out of the scripts through the PowerShell parser, and
-stand in only for the calls that would touch the network or the machine.
+stand in only for the calls that would touch the network or the machine. Two of them run
+a script as a whole, in a process where those calls are replaced and checked before the
+script starts.
 
 | File | Covers |
 |------|--------|
 | `Test-Retry.ps1` | Which errors count as a network fault, and how an update is retried |
 | `Test-GalleryLookup.ps1` | The PSGallery lookup, and how an incomplete one is reported in the log, the toast and the ping |
 | `Test-ModuleOwnership.ps1` | Telling modules installed by PSResourceGet from another program's, and finding a version on disk |
-| `Test-Config.ps1` | That `config.example.json` is valid, matches the built-in defaults, and that a missing `config.json` is fine. Loading `KeepVersions`, and a config file that cannot be read |
+| `Test-Config.ps1` | That `config.example.json` is valid, matches the built-in defaults, and that a missing `config.json` is fine. Loading `KeepVersions`, and telling a file that cannot be read from one with a bad entry |
+| `Test-ConfigFault.ps1` | A config file that cannot be read: the whole script is run and must touch no module, keep its logs, show a toast and send a fail ping |
 | `Test-KeepVersions.ps1` | Version lines: what a selector covers, what is kept and what is pruned, which lines are updated and to what |
 | `Test-Migration.ps1` | The OneDrive migration, run as a whole against a made-up folder tree: what is copied, what is left in place, what is cleaned up, and what the log says |
 
