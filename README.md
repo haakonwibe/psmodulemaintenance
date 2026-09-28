@@ -16,6 +16,10 @@ Automated PowerShell module maintenance for Windows. Updates all PSResourceGet-m
 - 🛡️ **Per-Module Timeout** — Each module update runs in an isolated runspace with a configurable timeout, preventing one slow module from blocking the entire run
 - 🔁 **Retry on Network Faults** — A dropped connection or gateway hiccup is retried (up to three attempts) instead of costing the module a week
 - 📡 **Healthchecks.io Monitoring** — Optional dead-man's switch that alerts when a scheduled run never happens, not just when one fails
+- 🚦 **No False Green** — An unreachable PSGallery, a skipped module or a config problem is reported as unsuccessful in the log, the toast and the ping, never as "up to date"
+- 🧯 **Cautious When Unsure** — A `config.json` that cannot be read stops the run before any module is touched, and a single entry that is not understood leaves that module alone
+- 🤝 **Leaves Other Programs' Modules Alone** — A module that another program installed and maintains is neither migrated nor pruned
+- 🧪 **Tests Included** — The fault paths a normal run never reaches are covered by tests that need no network and no elevation
 
 ## Requirements
 
@@ -324,7 +328,7 @@ Numbers are compared one by one, so `"1"` does not cover 12.4.0.
 PSModuleMaintenance can show a Windows toast notification after each run. Set `NotificationMode` in `config.json`:
 
 - **`"Always"`** — Notification after every run with a summary of updates and pruning (default)
-- **`"OnFailure"`** — Notification only when modules fail to update or versions fail to prune
+- **`"OnFailure"`** — Notification only when something did not succeed: a module update, a pin, a prune, the PSGallery lookup, or reading `config.json`
 - **`"Never"`** — No notifications
 
 The toast uses the built-in Windows "Security and Maintenance" notification channel — no additional setup required.
@@ -562,7 +566,7 @@ nothing to configure. The weekly log notes them without raising a warning:
 
 ## How It Works
 
-1. **Load Configuration** — Reads `config.json` for exclusions and settings, or uses the built-in defaults if there is none
+1. **Load Configuration** — Reads `config.json` for exclusions and settings, or uses the built-in defaults if there is none. A file that [cannot be read](#if-configjson-cannot-be-read) stops the run before any module is touched, and an entry that is [not understood](#if-a-single-entry-is-not-understood) takes its module out of the run
 2. **Initialize Logging** — Creates timestamped log files and starts transcript
 3. **Resolve Monitoring Secret** — Reads the Healthchecks ping URL from the vault and sends a start ping. Done before any module work, because the script prunes `SecretManagement` itself
 4. **Self-Check** — Warns if the scheduled task launches a hard-coded interpreter path that a PowerShell reinstall would break

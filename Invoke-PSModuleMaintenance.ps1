@@ -8,9 +8,18 @@
     - Removes old versions while keeping the latest
     - Logs all operations with configurable retention
     - Supports module exclusions via config file
+    - Holds a module at a pinned version, or keeps an older version line updated next to
+      the newest one (PinnedModules and KeepVersions in the config file)
+    - Gives each update a timeout, and retries it after a network fault
+    - Touches no module when the config file cannot be read, and leaves a module alone when
+      the config entry about it is not understood
+    - Shows a toast notification and pings Healthchecks.io, if enabled
+
+    See README.md for the settings and for what each log line means.
 
 .PARAMETER ConfigPath
     Path to the JSON configuration file. Defaults to script directory's config.json.
+    Without such a file the built-in defaults are used.
 
 .PARAMETER LogPath
     Base path for logs. Defaults to $env:ProgramData\PSModuleMaintenance\Logs

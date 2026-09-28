@@ -7,9 +7,12 @@
     module path ends up inside OneDrive. This causes sync conflicts, cloud placeholders, and
     file locks that break module updates and pruning.
 
-    This script detects the OneDrive redirect, copies all CurrentUser modules to AllUsers scope
+    This script detects the OneDrive redirect, copies the CurrentUser modules to AllUsers scope
     ($env:ProgramFiles\PowerShell\Modules), then cleans up the OneDrive copies using a
     four-stage escalation for stubborn locked/cloud-placeholder files.
+
+    Only modules installed by PSResourceGet are migrated. A module that another program put
+    there is left in place. An original is only removed once its copy is in AllUsers.
 
     This is a one-time migration. After running it, the weekly maintenance script
     (Invoke-PSModuleMaintenance.ps1) automatically detects OneDrive and targets AllUsers scope
