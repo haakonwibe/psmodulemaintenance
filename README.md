@@ -182,9 +182,35 @@ Test-Json -Path .\config.json -SchemaFile .\config.schema.json
 ```
 
 A `config.json` that does not exist is a different matter and not a problem: the script
-then runs on the built-in defaults, as it always has. So is a single entry that is not
-understood, such as a pin with an impossible version. That is logged as a warning, the
-entry is ignored and the run goes on.
+then runs on the built-in defaults, as it always has.
+
+### If a single entry is not understood
+
+An entry in `PinnedModules` or `KeepVersions` that cannot be understood, such as a pin of
+`"2.*"` or a line written as `"5.x"`, says that something was wanted for that module but
+not what. **That module is left alone for the run: not updated and not pruned**, exactly as
+if it were excluded. Every other module is maintained as usual.
+
+Ignoring the entry would treat the module like any other, and remove the very versions the
+entry was most likely there to keep.
+
+```
+[ERROR] Contoso.Tools is left alone in this run, not updated and not pruned. A config entry for it is not understood (KeepVersions: '5.x' is not a version prefix such as 5 or 5.7)
+[WARN] PSModuleMaintenance completed with 1 unsuccessful operation(s) (config: 1, lookups: 0, updates: 0, pins: 0, prunes: 0)
+```
+
+| Case | What happens |
+|---|---|
+| One selector in a list is wrong, the others are fine | The whole entry counts as not understood |
+| The module has a good pin and a bad `KeepVersions` entry, or the other way round | Both are set aside, the module is left alone |
+| A version or selector without quotes | Not understood. JSON reads `5.10` as the number 5.1 |
+| An empty list of selectors | Not understood |
+| The module is also in `ExcludedModules` | A warning only. It is left alone anyway, and the run counts as successful |
+| A whole setting has the wrong shape, such as a list where `KeepVersions` expects an object | Counts as a file that cannot be read, see above. It is not known which modules were meant |
+
+The run is reported as unsuccessful in the closing log line, the toast and the Healthchecks
+ping until the entry is put right. However many modules are affected, it counts as one
+failure.
 
 ## Version Pinning
 
@@ -220,7 +246,7 @@ A run with `"PSWriteColor": "1.0.2"` pinned while 1.0.3 is installed logs:
 
 ### Rules and edge cases
 
-- **The version must be exact.** `"2.19.0"` and `"2.19"` are the same pin (versions are padded to four parts, so `2.19` = `2.19.0.0`). Ranges and wildcards are not supported — `"2.*"` or `"latest"` is logged as a warning and the pin is ignored.
+- **The version must be exact.** `"2.19.0"` and `"2.19"` are the same pin (versions are padded to four parts, so `2.19` = `2.19.0.0`). Ranges and wildcards are not supported — `"2.*"` or `"latest"` is not understood, and the module is [left alone](#if-a-single-entry-is-not-understood) until the pin is put right.
 - **Prerelease pins work**: `"6.0.0-beta1"`. The label must match exactly.
 - **Pinning never installs a module you don't already have.** A pin for a module that isn't installed logs a note and does nothing.
 - **If the pinned version can't be installed** (wrong version number, gallery unreachable), pruning leaves *all* installed versions of that module in place rather than deleting the ones you have. You'll see a `WARN` in the log and a `PinsFailed` entry in the summary.
@@ -282,7 +308,7 @@ Numbers are compared one by one, so `"1"` does not cover 12.4.0.
 
 ### Rules and edge cases
 
-- **Write selectors in quotes.** JSON reads an unquoted `5.10` as the number 5.1, which is a different line. Anything that is not a quoted version prefix is ignored with a warning.
+- **Write selectors in quotes.** JSON reads an unquoted `5.10` as the number 5.1, which is a different line. Anything that is not a quoted version prefix is not understood, and the module is then [left alone](#if-a-single-entry-is-not-understood) until the entry is put right.
 - **A line is only maintained once you have a version of it.** If nothing installed matches a selector, the log warns and nothing else happens: the script never brings a line onto a machine that does not have it, and the run still counts as successful. Install a version of the line yourself once, and it is kept current from then on.
 - **Only stable releases are installed.** A prerelease you installed yourself is kept like any other version, but a line update never picks one.
 - **Two selectors can overlap.** With `["5", "5.7"]` the 5 line moves to the newest 5.x.y and the 5.7 line to the newest 5.7.x, and both results stay.
@@ -421,6 +447,7 @@ C:\ProgramData\PSModuleMaintenance\Logs\
     { "Module": "Pester", "Pinned": "5.7.1", "Available": "6.0.1" }
   ],
   "ConfigFault": null,
+  "ProtectedModules": [],
   "KeepVersions": { "PSReadLine": ["2"] },
   "KeepVersionsMatched": [
     { "Module": "PSReadLine", "Selector": "2", "Version": "2.3.6" }
@@ -438,6 +465,8 @@ C:\ProgramData\PSModuleMaintenance\Logs\
 `ModulesUnchecked` counts installed modules that PSGallery gave no answer for, with the reason in `GalleryFault`. Any non-zero value is reported as a single failure. `ModulesChecked` excludes them, so an unreachable gallery reads `"ModulesChecked": 0` rather than looking like a full check that found nothing. A module that simply is not on PSGallery counts as checked.
 
 `ConfigFault` holds the reason when `config.json` could not be read, and is `null` otherwise. When it is set, every count in the summary is zero, because the run stopped before touching anything.
+
+`ProtectedModules` lists the modules that were left alone because a config entry about them was not understood, each as `{ "Module": "...", "Problem": "..." }`. Anything in it makes the run count as unsuccessful.
 
 `KeepVersionsMatched` lists the version each kept line resolved to, and `KeepLinesUpdated` the lines that were moved forward this run. `KeepVersionsUnmatched` holds selectors that matched nothing installed; that is a warning in the log, not a failure. `KeepLinesUnchecked` holds lines PSGallery gave no answer for, which does count, together with `ModulesUnchecked`, as a single failure.
 
@@ -695,8 +724,8 @@ script starts.
 | `Test-Retry.ps1` | Which errors count as a network fault, and how an update is retried |
 | `Test-GalleryLookup.ps1` | The PSGallery lookup, and how an incomplete one is reported in the log, the toast and the ping |
 | `Test-ModuleOwnership.ps1` | Telling modules installed by PSResourceGet from another program's, and finding a version on disk |
-| `Test-Config.ps1` | That `config.example.json` is valid, matches the built-in defaults, and that a missing `config.json` is fine. Loading `KeepVersions`, and telling a file that cannot be read from one with a bad entry |
-| `Test-ConfigFault.ps1` | A config file that cannot be read: the whole script is run and must touch no module, keep its logs, show a toast and send a fail ping |
+| `Test-Config.ps1` | That `config.example.json` is valid, matches the built-in defaults, and that a missing `config.json` is fine. Loading `KeepVersions`, and telling apart a file that cannot be read, a setting of the wrong shape and a single entry that is not understood |
+| `Test-ConfigFault.ps1` | The whole script is run against made-up modules. With a config file that cannot be read it must touch no module, keep its logs, show a toast and send a fail ping. With one entry that is not understood it must leave that module alone and maintain the others |
 | `Test-KeepVersions.ps1` | Version lines: what a selector covers, what is kept and what is pruned, which lines are updated and to what |
 | `Test-Migration.ps1` | The OneDrive migration, run as a whole against a made-up folder tree: what is copied, what is left in place, what is cleaned up, what happens when a copy does not succeed, and what the log says |
 

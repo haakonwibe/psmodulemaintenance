@@ -21,7 +21,7 @@ $wanted = 'ConvertTo-NormalizedVersion', 'Get-ModuleVersionKey', 'ConvertFrom-Pi
           'Test-KeepVersionMatch', 'Get-KeepVersionSelectors', 'Get-KeepVersionRange',
           'Get-ModulePrunePlan', 'Get-KeptLinePlan', 'Confirm-KeptModuleVersions',
           'Update-KeptVersionLines', 'Set-PinnedModuleVersions', 'Remove-OldModuleVersions',
-          'Update-AllModules'
+          'Update-AllModules', 'Get-UntouchedModuleNames'
 foreach ($name in $wanted) {
     . ([scriptblock]::Create((Get-ScriptFunctionText -Path $script:MainScript -Name $name)))
 }
@@ -58,7 +58,17 @@ function Get-VersionList {
 }
 
 function Reset-State {
-    param([hashtable]$Keep = @{}, [hashtable]$Pins = @{}, [string[]]$Excluded = @())
+    param(
+        [hashtable]$Keep = @{}, [hashtable]$Pins = @{}, [string[]]$Excluded = @(),
+
+        # Modules left alone because a config entry about them was not understood
+        [string[]]$Protected = @()
+    )
+
+    $script:ProtectedModules = @{}
+    foreach ($name in $Protected) {
+        $script:ProtectedModules[$name] = @('KeepVersions: not understood')
+    }
 
     $keepTable = @{}
     foreach ($key in $Keep.Keys) {
@@ -568,6 +578,18 @@ Remove-OldModuleVersions
 Assert-That (@((Get-LogLines 'WARN') | Where-Object { $_ -like "*no installed version of Northwind.Data matches '2'*" }).Count -eq 1) 'a module with one version and a selector that matches nothing is still warned about'
 Assert-That ($script:Summary.PrunesFailed.Count -eq 0) 'and that is not an unsuccessful prune'
 
+# A module whose config entry was not understood. Without its entry it would look like
+# any other module, and its old versions would be the first to go
+Reset-State -Protected @('Contoso.Tools')
+$script:Installed = $machine
+Remove-OldModuleVersions
+Assert-That (($script:UninstallCalls -join '; ') -eq 'Fabrikam.Core 1.0.0') "a module left alone because of its config entry is not pruned: $($script:UninstallCalls -join '; ')"
+
+Reset-State -Protected @('contoso.tools')
+$script:Installed = $machine
+Remove-OldModuleVersions
+Assert-That (($script:UninstallCalls -join '; ') -eq 'Fabrikam.Core 1.0.0') 'whatever the casing of its name in the config'
+
 # --- Wiring into the update phase ----------------------------------------------------
 Write-Section 'Update-AllModules'
 
@@ -617,6 +639,17 @@ $script:MainAnswer = $upToDate
 $script:LineAnswer = { param($Name, $Range) New-Answer -Resources @((New-Resource -Name $Name -Version '5.8.0')) }
 Update-AllModules
 Assert-That ($script:InstallCalls.Count -eq 0) 'an excluded module gets no line update'
+
+# A module left alone because of its config entry is not updated either
+Reset-State -Protected @('Contoso.Tools')
+$script:Installed = $machine
+$script:MainAnswer = { param($Names) New-Answer -Resources @((New-Resource -Version '6.2.0'), (New-Resource -Name 'Fabrikam.Core' -Version '2.1.0'), (New-Resource -Name 'Northwind.Data' -Version '3.0.0')) }
+Update-AllModules
+$updated = @($script:InstallCalls | ForEach-Object { $_.Name })
+Assert-That (($updated -join ',') -eq 'Fabrikam.Core') "a module left alone because of its config entry is not updated, the others are: $($updated -join ',')"
+$asked = @($script:LookupCalls[0].Name)
+Assert-That ($asked -notcontains 'Contoso.Tools') 'it is not even looked up on the gallery'
+Assert-That ($script:Summary.ModulesChecked -eq 2) 'and is not counted among the modules that were checked'
 
 # --- The stand-ins, once more --------------------------------------------------------
 Write-Section 'Stand-ins'

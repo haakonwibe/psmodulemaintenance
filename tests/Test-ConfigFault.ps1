@@ -102,7 +102,17 @@ $runnerPath = Join-Path $root 'runner.ps1'
 # Runs in the child process. Everything that could change the machine or reach the
 # network is a stand-in here, and each one writes down that it was called
 $runner = @'
-param([string]$ScriptPath, [string]$ConfigPath, [string]$LogPath, [string]$CallsPath, [string]$Mode)
+param(
+    [string]$ScriptPath, [string]$ConfigPath, [string]$LogPath, [string]$CallsPath, [string]$Mode,
+
+    # A JSON list of made-up installed modules, each with a Name and a Version
+    [string]$ModulesPath
+)
+
+# The same result on a machine with OneDrive as on one without
+$env:OneDrive = $null
+$env:OneDriveCommercial = $null
+$env:OneDriveConsumer = $null
 
 # Get-PSResource is not a cmdlet. It is an alias the module gives Get-InstalledPSResource,
 # and an alias is found before a function, so a stand-in named Get-PSResource is passed
@@ -136,12 +146,30 @@ function global:Invoke-RestMethod {
     Add-Call "ping $Uri"
     if ($Body) { Add-Call ('body ' + (($Body -split "`r?`n") -join ' | ')) }
 }
-function global:Get-PSResource { [CmdletBinding()] param($Name, $Scope) Add-Call 'Get-PSResource' }
-function global:Get-InstalledPSResource { [CmdletBinding()] param($Name, $Scope) Add-Call 'Get-PSResource' }
+$global:MadeUpModules = @()
+if ($ModulesPath) {
+    $global:MadeUpModules = @(Get-Content -LiteralPath $ModulesPath -Raw | ConvertFrom-Json | ForEach-Object {
+        [PSCustomObject]@{
+            Name              = $_.Name
+            Version           = [version]$_.Version
+            Prerelease        = ''
+            InstalledLocation = "C:\MadeUp\Modules\$($_.Name)\$($_.Version)"
+        }
+    })
+}
+
+function global:Get-PSResource { [CmdletBinding()] param($Name, $Scope) Add-Call 'Get-PSResource'; $global:MadeUpModules }
+function global:Get-InstalledPSResource { [CmdletBinding()] param($Name, $Scope) Add-Call 'Get-PSResource'; $global:MadeUpModules }
+
+# The gallery has nothing newer, so no update is ever due. That matters: an update runs
+# in a runspace of its own, where these stand-ins do not exist
 function global:Find-PSResource { [CmdletBinding()] param($Name, $Repository, $Version) Add-Call 'Find-PSResource' }
-function global:Update-PSResource { [CmdletBinding()] param($Name, $Scope) Add-Call 'Update-PSResource' }
-function global:Install-PSResource { [CmdletBinding()] param($Name, $Scope, $Version) Add-Call 'Install-PSResource' }
-function global:Uninstall-PSResource { [CmdletBinding()] param($Name, $Scope, $Version) Add-Call 'Uninstall-PSResource' }
+function global:Update-PSResource { [CmdletBinding()] param($Name, $Scope) Add-Call "Update-PSResource $Name" }
+function global:Install-PSResource { [CmdletBinding()] param($Name, $Scope, $Version) Add-Call "Install-PSResource $Name" }
+function global:Uninstall-PSResource {
+    [CmdletBinding()] param($Name, $Scope, $Version, [switch]$SkipDependencyCheck)
+    Add-Call "Uninstall-PSResource $Name $Version"
+}
 function global:Get-ScheduledTask { [CmdletBinding()] param($TaskName) }
 
 # Checked with the module loaded, which is the state the script will run in
@@ -162,15 +190,27 @@ if ($Mode) { $arguments[$Mode] = $true }
 
 # Runs the script once and returns what it logged, what it called and what it summed up
 function Invoke-WholeScript {
-    param([string]$ConfigText, [string]$Mode, [switch]$WithOldLog)
+    param(
+        [string]$ConfigText, [string]$Mode, [switch]$WithOldLog,
+
+        # Made-up installed modules, as 'Name Version'
+        [string[]]$Modules = @()
+    )
 
     $folder = Join-Path $root ([guid]::NewGuid().ToString('N'))
     $logFolder = Join-Path $folder 'Logs'
     New-Item -Path $logFolder -ItemType Directory -Force | Out-Null
     $configPath = Join-Path $folder 'config.json'
     $callsPath = Join-Path $folder 'calls.txt'
+    $modulesPath = Join-Path $folder 'modules.json'
     Set-Content -LiteralPath $configPath -Value $ConfigText
     Set-Content -LiteralPath $callsPath -Value 'started'
+
+    $list = @($Modules | ForEach-Object {
+        $name, $version = $_ -split ' ', 2
+        @{ Name = $name; Version = $version }
+    })
+    Set-Content -LiteralPath $modulesPath -Value (ConvertTo-Json -InputObject $list -Depth 3)
 
     $oldLog = Join-Path $logFolder 'maintenance_2020-01-05_030000.log'
     if ($WithOldLog) {
@@ -179,7 +219,8 @@ function Invoke-WholeScript {
     }
 
     $all = @('-NoProfile', '-NonInteractive', '-File', $runnerPath, '-ScriptPath', $script:MainScript,
-             '-ConfigPath', $configPath, '-LogPath', $logFolder, '-CallsPath', $callsPath)
+             '-ConfigPath', $configPath, '-LogPath', $logFolder, '-CallsPath', $callsPath,
+             '-ModulesPath', $modulesPath)
     if ($Mode) { $all += @('-Mode', $Mode) }
     & pwsh @all *> $null
     $exitCode = $LASTEXITCODE
@@ -206,7 +247,15 @@ function Invoke-WholeScript {
     }
 }
 
-$touching = 'Get-PSResource', 'Find-PSResource', 'Update-PSResource', 'Install-PSResource', 'Uninstall-PSResource'
+$touching = 'Get-PSResource', 'Find-PSResource', 'Update-PSResource*', 'Install-PSResource*', 'Uninstall-PSResource*'
+$installed = 'Contoso.Tools 6.1.0', 'Contoso.Tools 5.7.1', 'Fabrikam.Core 2.0.0', 'Fabrikam.Core 1.0.0', 'Northwind.Data 3.0.0'
+
+# Calls that look at, change or remove a module
+function Get-TouchingCalls {
+    param($Calls)
+    , @($Calls | Where-Object { $call = $_; @($touching | Where-Object { $call -like $_ }).Count -gt 0 })
+}
+
 $brokenConfig = '{ "ExcludedModules": ["Contoso.Tools"], "KeepVersions": { "Fabrikam.Core": ["5"] '
 $goodConfig = '{ "NotificationMode": "Never", "LogRetentionDays": 180, "Healthchecks": { "Enabled": false } }'
 
@@ -217,23 +266,48 @@ try {
     # --- A config that can be read, for comparison -----------------------------------
     Write-Section 'The whole script, with a config that can be read'
 
-    $run = Invoke-WholeScript -ConfigText $goodConfig -WithOldLog
+    $run = Invoke-WholeScript -ConfigText $goodConfig -WithOldLog -Modules $installed
+    $removed = @($run.Calls | Where-Object { $_ -like 'Uninstall-PSResource*' } | Sort-Object)
     Assert-That ($run.ExitCode -ne 3) 'the stand-ins were in place'
-    Assert-That ($run.Log -contains '[INFO] Found 0 installed modules (excluding: )') 'the script sees the stand-in, not the modules on this machine'
+    Assert-That ($run.Log -contains '[INFO] Found 3 installed modules (excluding: )') 'the script sees the made-up modules, not the ones on this machine'
     Assert-That ($run.Log -contains '[INFO] Starting module updates...') 'the update phase is entered'
     Assert-That ($run.Log -contains '[INFO] Starting old version cleanup...') 'the prune phase is entered'
-    Assert-That ($run.Calls -contains 'Get-PSResource') 'installed modules are looked at'
+    Assert-That (($removed -join '; ') -eq 'Uninstall-PSResource Contoso.Tools 5.7.1; Uninstall-PSResource Fabrikam.Core 1.0.0') "old versions are pruned: $($removed -join '; ')"
+    Assert-That (@($run.Calls | Where-Object { $_ -like 'Update-PSResource*' -or $_ -like 'Install-PSResource*' }).Count -eq 0) 'nothing is updated, the made-up gallery has nothing newer'
     Assert-That ($run.Log -contains '[SUCCESS] PSModuleMaintenance completed successfully') 'the run ends as a success'
     Assert-That (-not $run.OldLogKept) 'a log older than the retention is removed'
     Assert-That (@($run.Calls | Where-Object { $_ -like 'ping*' -or $_ -eq 'toast' }).Count -eq 0) 'nothing is sent, as the config says'
 
+    # --- One entry that is not understood --------------------------------------------
+    Write-Section 'The whole script, with one entry that is not understood'
+
+    $oneBadEntry = '{ "KeepVersions": { "Contoso.Tools": ["5.x"] }, "Healthchecks": { "Enabled": true } }'
+    $run = Invoke-WholeScript -ConfigText $oneBadEntry -Modules $installed
+    $removed = @($run.Calls | Where-Object { $_ -like 'Uninstall-PSResource*' })
+    Assert-That ($run.ExitCode -ne 3) 'the stand-ins were in place'
+    Assert-That (($removed -join '; ') -eq 'Uninstall-PSResource Fabrikam.Core 1.0.0') "the module the entry was about keeps all its versions, the others are pruned as usual: $($removed -join '; ')"
+    Assert-That ($run.Log -contains "[ERROR] Contoso.Tools is left alone in this run, not updated and not pruned. A config entry for it is not understood (KeepVersions: '5.x' is not a version prefix such as 5 or 5.7)") 'the log says which module, and what is wrong with the entry'
+    Assert-That ($run.Log -contains '[INFO]   - Modules left alone, entry not understood: 1') 'it is counted in the configuration that was loaded'
+    Assert-That ($run.Log -contains '[INFO] Found 2 installed modules (excluding: )') 'and is not among the modules that are looked at'
+    Assert-That ($run.Log -contains '[WARN] PSModuleMaintenance completed with 1 unsuccessful operation(s) (config: 1, lookups: 0, updates: 0, pins: 0, prunes: 0)') 'the run does not end as a success'
+    Assert-That ($run.Log -contains '[INFO] Toast notification sent: Updated 0 modules. Pruned 1 versions. 1 module(s) left alone, check config.json.') 'the toast points at the config'
+    Assert-That ($run.Calls -contains 'ping https://hc.invalid/ping/made-up/fail') 'a fail ping is sent'
+    Assert-That (@($run.Calls | Where-Object { $_ -like 'body *config: Contoso.Tools left alone, entry not understood*' }).Count -eq 1) 'its body names the module'
+    $summary = $run.SummaryText | ConvertFrom-Json
+    Assert-That ((@($summary.ProtectedModules).Count -eq 1) -and ($summary.ProtectedModules[0].Module -eq 'Contoso.Tools')) 'the summary lists it'
+    Assert-That ($null -eq $summary.ConfigFault) 'the file itself is not reported as unreadable'
+
+    $run = Invoke-WholeScript -ConfigText $oneBadEntry -Modules $installed -Mode 'PruneOnly'
+    $removed = @($run.Calls | Where-Object { $_ -like 'Uninstall-PSResource*' })
+    Assert-That (($removed -join '; ') -eq 'Uninstall-PSResource Fabrikam.Core 1.0.0') '-PruneOnly: the same'
+
     # --- A config that cannot be read ------------------------------------------------
     Write-Section 'The whole script, with a config that cannot be read'
 
-    $run = Invoke-WholeScript -ConfigText $brokenConfig -WithOldLog
+    $run = Invoke-WholeScript -ConfigText $brokenConfig -WithOldLog -Modules $installed
     Assert-That ($run.ExitCode -ne 3) 'the stand-ins were in place'
 
-    Assert-That (@($run.Calls | Where-Object { $_ -in $touching }).Count -eq 0) "no module is looked at, updated or removed (calls: $(($run.Calls | Where-Object { $_ -in $touching }) -join ', '))"
+    Assert-That ((Get-TouchingCalls $run.Calls).Count -eq 0) "no module is looked at, updated or removed (calls: $((Get-TouchingCalls $run.Calls) -join ', '))"
     Assert-That ($run.Log -notcontains '[INFO] Starting module updates...') 'the update phase is not entered'
     Assert-That ($run.Log -notcontains '[INFO] Starting old version cleanup...') 'the prune phase is not entered'
     Assert-That ($run.OldLogKept) 'no old log is removed either, how long to keep them is in that file too'
@@ -263,15 +337,20 @@ try {
     Write-Section 'A config that cannot be read, in the other modes'
 
     foreach ($mode in 'PruneOnly', 'UpdateOnly') {
-        $run = Invoke-WholeScript -ConfigText $brokenConfig -Mode $mode
-        Assert-That (@($run.Calls | Where-Object { $_ -in $touching }).Count -eq 0) "-${mode}: no module is touched"
+        $run = Invoke-WholeScript -ConfigText $brokenConfig -Mode $mode -Modules $installed
+        Assert-That ((Get-TouchingCalls $run.Calls).Count -eq 0) "-${mode}: no module is touched"
         Assert-That (@($run.Log | Where-Object { $_ -like '`[ERROR`] Could not read the config file: *' }).Count -eq 1) "-${mode}: and the log says why"
     }
 
-    $run = Invoke-WholeScript -ConfigText $brokenConfig -Mode 'WhatIf'
-    Assert-That (@($run.Calls | Where-Object { $_ -in $touching }).Count -eq 0) '-WhatIf: no module is touched'
+    $run = Invoke-WholeScript -ConfigText $brokenConfig -Mode 'WhatIf' -Modules $installed
+    Assert-That ((Get-TouchingCalls $run.Calls).Count -eq 0) '-WhatIf: no module is touched'
     Assert-That (@($run.Calls | Where-Object { $_ -like 'ping *' }).Count -eq 0) '-WhatIf: no ping is sent, a dry run never pings'
     Assert-That ($run.Log -contains '[INFO] Healthchecks ping skipped (WhatIf): Fail') '-WhatIf: and the log says it was skipped'
+
+    # A setting of the wrong shape names no module, so it counts as an unreadable file
+    $run = Invoke-WholeScript -ConfigText '{ "KeepVersions": ["Contoso.Tools"] }' -Modules $installed
+    Assert-That ((Get-TouchingCalls $run.Calls).Count -eq 0) 'a setting of the wrong shape: no module is touched'
+    Assert-That ($run.Log -contains '[ERROR] Could not read the config file: KeepVersions has to be an object that maps a module name to a list of version prefixes') 'and the log says which setting'
 
     # --- A file that is simply not there ---------------------------------------------
     Write-Section 'No config file at all'

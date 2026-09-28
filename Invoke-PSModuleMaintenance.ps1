@@ -85,6 +85,16 @@ $script:ConfigWarnings = @()
 # excluded, pinned or kept, and the built-in defaults would update and prune them all
 $script:ConfigFault = $null
 
+# Modules that are left alone for this run because a config entry about them was not
+# understood: name -> what was wrong. Such an entry says that something was wanted for
+# that module, but not what. Treating the module like any other would update it and
+# prune its old versions, which is most likely the very thing the entry was there to
+# prevent. So it is treated like an excluded module until the entry is put right
+$script:ProtectedModules = @{}
+
+# Entries that were not understood, collected while the config is read
+$script:ConfigBadEntries = @()
+
 # Healthchecks ping URL, resolved once at startup from the SecretManagement vault.
 # Held in memory for the run and deliberately never written to the log, the transcript
 # or the summary JSON — the ping URL is a bearer secret
@@ -98,16 +108,43 @@ function ConvertTo-PinnedModuleTable {
     <#
     .SYNOPSIS
         Converts the PinnedModules JSON object into a hashtable of parsed pin objects.
-        Entries with an unparseable version are dropped with a warning.
+
+    .NOTES
+        An entry that is not understood is not dropped quietly. It goes on the list of bad
+        entries, and Import-MaintenanceConfig then has that module left alone for the run.
+
+        A setting of the wrong shape altogether throws, which makes the whole file count
+        as unreadable: it is then not known which modules the setting was about.
     #>
     [CmdletBinding()]
     param($PinnedConfig)
 
+    if ($PinnedConfig -isnot [PSCustomObject]) {
+        throw 'PinnedModules has to be an object that maps a module name to a version'
+    }
+
     $table = @{}
     foreach ($entry in $PinnedConfig.PSObject.Properties) {
-        $parsed = ConvertFrom-PinnedVersionString $entry.Value
-        if (-not $parsed) {
-            $script:ConfigWarnings += "Ignoring pin for '$($entry.Name)': '$($entry.Value)' is not a valid version"
+        $problem = $null
+        $parsed = $null
+
+        if ($entry.Value -isnot [string]) {
+            # Unquoted, 2.10 reaches this script as the number 2.1, which is another version
+            $problem = "the version has to be a string in quotes, such as `"2.19.0`""
+        }
+        else {
+            $parsed = ConvertFrom-PinnedVersionString $entry.Value
+            if (-not $parsed) {
+                $problem = "'$($entry.Value)' is not a valid version"
+            }
+        }
+
+        if ($problem) {
+            $script:ConfigBadEntries += [PSCustomObject]@{
+                Module  = $entry.Name
+                Setting = 'PinnedModules'
+                Problem = $problem
+            }
             continue
         }
         $table[$entry.Name] = $parsed
@@ -119,57 +156,80 @@ function ConvertTo-KeepVersionTable {
     <#
     .SYNOPSIS
         Converts the KeepVersions JSON object into a hashtable of module name to parsed
-        selectors. Anything unusable is dropped with a warning.
+        selectors.
 
     .NOTES
         The table has to be a plain @{}, which looks names up without regard to case. The
         name in the config and the name of the installed module need not be cased alike.
+
+        One selector that is not understood spoils the whole entry, even if the others are
+        fine: what was meant by it is not known, so neither is what should be kept. The
+        entry goes on the list of bad entries and that module is left alone for the run.
     #>
     [CmdletBinding()]
     param($KeepConfig)
 
-    $table = @{}
-
     if ($KeepConfig -isnot [PSCustomObject]) {
-        $script:ConfigWarnings += 'Ignoring KeepVersions: it has to be an object that maps a module name to a list of version prefixes'
+        throw 'KeepVersions has to be an object that maps a module name to a list of version prefixes'
     }
-    else {
-        foreach ($entry in $KeepConfig.PSObject.Properties) {
-            $selectors = @()
-            $seen = @()
 
-            # @() also accepts a single value written without the list brackets
-            foreach ($value in @($entry.Value)) {
-                if ($null -eq $value) {
-                    continue
-                }
-                if ($value -isnot [string]) {
-                    $script:ConfigWarnings += "Ignoring a KeepVersions selector for '$($entry.Name)': it has to be a string in quotes, such as `"5`""
-                    continue
-                }
+    $table = @{}
+    foreach ($entry in $KeepConfig.PSObject.Properties) {
+        $selectors = @()
+        $seen = @()
+        $problems = @()
 
-                $selector = ConvertFrom-KeepVersionSelector -Value $value
-                if (-not $selector) {
-                    $script:ConfigWarnings += "Ignoring KeepVersions selector for '$($entry.Name)': '$value' is not a version prefix such as 5 or 5.7"
-                    continue
-                }
-
-                if ($selector.Key -notin $seen) {
-                    $seen += $selector.Key
-                    $selectors += $selector
-                }
+        # @() also accepts a single value written without the list brackets
+        foreach ($value in @($entry.Value)) {
+            if ($null -eq $value) {
+                continue
             }
-
-            if ($selectors.Count -eq 0) {
-                $script:ConfigWarnings += "Ignoring KeepVersions for '$($entry.Name)': the list holds no usable selector"
+            if ($value -isnot [string]) {
+                $problems += "'$value' has to be a string in quotes, such as `"5`""
                 continue
             }
 
-            $table[$entry.Name] = @($selectors)
+            $selector = ConvertFrom-KeepVersionSelector -Value $value
+            if (-not $selector) {
+                $problems += "'$value' is not a version prefix such as 5 or 5.7"
+                continue
+            }
+
+            if ($selector.Key -notin $seen) {
+                $seen += $selector.Key
+                $selectors += $selector
+            }
         }
+
+        if (($problems.Count -eq 0) -and ($selectors.Count -eq 0)) {
+            $problems += 'the list is empty'
+        }
+
+        if ($problems.Count -gt 0) {
+            $script:ConfigBadEntries += [PSCustomObject]@{
+                Module  = $entry.Name
+                Setting = 'KeepVersions'
+                Problem = ($problems -join ', ')
+            }
+            continue
+        }
+
+        $table[$entry.Name] = @($selectors)
     }
 
     return $table
+}
+
+function Get-UntouchedModuleNames {
+    <#
+    .SYNOPSIS
+        The modules this run leaves alone altogether: the excluded ones, and the ones
+        protected because a config entry about them was not understood.
+    #>
+    [CmdletBinding()]
+    param()
+
+    return @($script:Config.ExcludedModules) + @($script:ProtectedModules.Keys)
 }
 
 function Import-MaintenanceConfig {
@@ -183,15 +243,29 @@ function Import-MaintenanceConfig {
     if (Test-Path $Path) {
         try {
             $jsonConfig = Get-Content $Path -Raw | ConvertFrom-Json
-            
-            if ($jsonConfig.ExcludedModules) {
-                $script:Config.ExcludedModules = @($jsonConfig.ExcludedModules)
+
+            $script:ConfigBadEntries = @()
+            $script:ProtectedModules = @{}
+
+            # The three settings that say which modules are special. One of the wrong shape
+            # throws, and the file then counts as unreadable: it is not known which modules
+            # it was about. An empty list where an object belongs is let through as "none"
+            if ($null -ne $jsonConfig.ExcludedModules) {
+                $excluded = @($jsonConfig.ExcludedModules)
+                if (@($excluded | Where-Object { $_ -isnot [string] }).Count -gt 0) {
+                    throw 'ExcludedModules has to be a list of module names in quotes'
+                }
+                $script:Config.ExcludedModules = $excluded
             }
-            if ($jsonConfig.PinnedModules) {
-                $script:Config.PinnedModules = ConvertTo-PinnedModuleTable $jsonConfig.PinnedModules
+
+            $pinned = $jsonConfig.PinnedModules
+            if (($null -ne $pinned) -and (-not (($pinned -is [array]) -and ($pinned.Count -eq 0)))) {
+                $script:Config.PinnedModules = ConvertTo-PinnedModuleTable $pinned
             }
-            if ($jsonConfig.KeepVersions) {
-                $script:Config.KeepVersions = ConvertTo-KeepVersionTable $jsonConfig.KeepVersions
+
+            $kept = $jsonConfig.KeepVersions
+            if (($null -ne $kept) -and (-not (($kept -is [array]) -and ($kept.Count -eq 0)))) {
+                $script:Config.KeepVersions = ConvertTo-KeepVersionTable $kept
             }
             if ($null -ne $jsonConfig.LogRetentionDays) {
                 $script:Config.LogRetentionDays = $jsonConfig.LogRetentionDays
@@ -228,6 +302,33 @@ function Import-MaintenanceConfig {
             foreach ($name in @($script:Config.KeepVersions.Keys)) {
                 if ($name -in $script:Config.ExcludedModules) {
                     $script:ConfigWarnings += "'$name' is both excluded and listed in KeepVersions - exclusion takes precedence, the KeepVersions entry is ignored"
+                    $script:Config.KeepVersions.Remove($name)
+                }
+            }
+
+            # An entry that was not understood. If the module is excluded it is left alone
+            # anyway, and saying so is enough. Otherwise it is protected for this run, and
+            # whatever else the config says about it is set aside with the bad entry
+            foreach ($bad in $script:ConfigBadEntries) {
+                $name = $bad.Module
+                $what = "$($bad.Setting): $($bad.Problem)"
+
+                if ($name -in $script:Config.ExcludedModules) {
+                    $script:ConfigWarnings += "'$name' is excluded, so its $($bad.Setting) entry is ignored. That entry is not understood either: $($bad.Problem)"
+                    continue
+                }
+
+                if ($script:ProtectedModules.ContainsKey($name)) {
+                    $script:ProtectedModules[$name] = @($script:ProtectedModules[$name]) + $what
+                }
+                else {
+                    $script:ProtectedModules[$name] = @($what)
+                }
+
+                if ($script:Config.PinnedModules.ContainsKey($name)) {
+                    $script:Config.PinnedModules.Remove($name)
+                }
+                if ($script:Config.KeepVersions.ContainsKey($name)) {
                     $script:Config.KeepVersions.Remove($name)
                 }
             }
@@ -271,6 +372,7 @@ $script:Summary = @{
     PinsFailed = @()
     PinsHoldingBack = @()
     ConfigFault = $null
+    ProtectedModules = @()
     KeepVersions = @{}
     KeepVersionsMatched = @()
     KeepVersionsUnmatched = @()
@@ -371,6 +473,10 @@ function Get-SummaryFailures {
 
         A config file that could not be read counts as one. Nothing else can have gone
         wrong in such a run, because it stops before any module is touched.
+
+        Modules left alone because a config entry about them was not understood count as
+        one as well, however many there are. It is the config that needs putting right,
+        and until it is, those modules are neither updated nor pruned.
     #>
     [CmdletBinding()]
     param(
@@ -379,7 +485,7 @@ function Get-SummaryFailures {
     )
 
     $config = 0
-    if ($Summary.ConfigFault) {
+    if (($Summary.ConfigFault) -or ($Summary.ProtectedModules.Count -gt 0)) {
         $config = 1
     }
 
@@ -476,6 +582,10 @@ function Send-ToastNotification {
         $message = ($parts -join '. ') + '.'
         if (-not $hasFailures) {
             $message += ' No issues.'
+        }
+
+        if ($Summary.ProtectedModules.Count -gt 0) {
+            $message += " $($Summary.ProtectedModules.Count) module(s) left alone, check config.json."
         }
 
         if ($Summary.ConfigFault) {
@@ -690,6 +800,9 @@ function Format-HealthchecksBody {
     $issues = @()
     if ($Summary.ConfigFault) {
         $issues += "  - config: could not be read, so nothing was updated or pruned: $($Summary.ConfigFault)"
+    }
+    foreach ($item in @($Summary.ProtectedModules | Where-Object { $_ })) {
+        $issues += "  - config: $($item.Module) left alone, entry not understood: $($item.Problem)"
     }
     if ($Summary.ModulesUnchecked -gt 0) {
         $issues += "  - lookup: $($Summary.ModulesUnchecked) module(s) not checked: $($Summary.GalleryFault)"
@@ -2227,8 +2340,9 @@ function Update-AllModules {
     # Get installed modules (newest version of each)
     # When OneDrive is detected, modules live in AllUsers scope — query that explicitly
     $getParams = if ($useAllUsersScope) { @{ Scope = 'AllUsers' } } else { @{} }
+    $untouched = @(Get-UntouchedModuleNames)
     $allResources = @(Get-PSResource @getParams |
-        Where-Object { $_.Name -notin $script:Config.ExcludedModules })
+        Where-Object { $_.Name -notin $untouched })
 
     $installed = @($allResources |
         Group-Object Name |
@@ -2515,7 +2629,8 @@ function Remove-OldModuleVersions {
 
     # When OneDrive is detected, modules live in AllUsers scope — query that explicitly
     $getParams = if ($isOneDrive) { @{ Scope = 'AllUsers' } } else { @{} }
-    $allModules = Get-PSResource @getParams | Where-Object { $_.Name -notin $script:Config.ExcludedModules }
+    $untouched = @(Get-UntouchedModuleNames)
+    $allModules = Get-PSResource @getParams | Where-Object { $_.Name -notin $untouched }
 
     # --- Pass 1: Remove old versions of AllUsers modules (keep latest) ---
     $allUsersModulePath = Join-Path $env:ProgramFiles 'PowerShell\Modules'
@@ -2706,6 +2821,17 @@ try {
         $script:HealthchecksUrl = Get-HealthchecksUrl -WithoutConfig
     }
     else {
+        # Modules that are left alone because a config entry about them is not understood.
+        # At ERROR, not WARN: until the entry is put right these modules are not maintained
+        foreach ($protectedName in @($script:ProtectedModules.Keys | Sort-Object)) {
+            $problems = @($script:ProtectedModules[$protectedName]) -join '; '
+            Write-Log "$protectedName is left alone in this run, not updated and not pruned. A config entry for it is not understood ($problems)" -Level ERROR
+            $script:Summary.ProtectedModules += @{
+                Module  = $protectedName
+                Problem = $problems
+            }
+        }
+
         # Record the effective pins in the summary (name -> version) so they show up even for -PruneOnly
         foreach ($pinName in $script:Config.PinnedModules.Keys) {
             $script:Summary.PinnedModules[$pinName] = $script:Config.PinnedModules[$pinName].Requested
@@ -2722,6 +2848,7 @@ try {
         Write-Log "  - Excluded modules: $($script:Config.ExcludedModules.Count)"
         Write-Log "  - Pinned modules: $($script:Config.PinnedModules.Count)"
         Write-Log "  - Modules with kept versions: $($script:Config.KeepVersions.Count)"
+        Write-Log "  - Modules left alone, entry not understood: $($script:ProtectedModules.Count)"
         Write-Log "  - Log retention: $($script:Config.LogRetentionDays) days"
         Write-Log "  - Trust PSGallery: $($script:Config.TrustPSGallery)"
         Write-Log "  - Notification mode: $($script:Config.NotificationMode)"

@@ -257,7 +257,7 @@ function New-Summary {
         ModulesChecked = 0; ModulesUnchecked = 0; GalleryFault = $null; ModulesUpdated = 0
         ModulesFailed = @(); VersionsPruned = 0; PrunesFailed = @(); ExcludedModules = @()
         PinnedModules = @{}; PinsSatisfied = 0; PinsEnforced = 0; PinsFailed = @()
-        PinsHoldingBack = @(); ConfigFault = $null
+        PinsHoldingBack = @(); ConfigFault = $null; ProtectedModules = @()
         KeepVersions = @{}; KeepVersionsMatched = @(); KeepVersionsUnmatched = @()
         KeepLinesUpdated = @(); KeepLinesUnchecked = @()
     }
@@ -387,5 +387,30 @@ Send-ToastNotification -Summary $fault
 $toastLine = $script:LogLines | Where-Object { $_ -like '*Toast notification sent*' }
 Assert-That ($toastLine -like '*Toast notification sent: The config file could not be read. Nothing was updated or pruned.') "toast: $toastLine"
 Assert-That ($toastLine -notlike '*Updated 0 modules*') 'toast: does not read like a quiet week'
+
+# --- Reporting modules that were left alone ------------------------------------------
+Write-Section 'Reporting modules left alone because of a config entry'
+
+$protected = New-Summary
+$protected.ModulesUpdated = 2
+$protected.VersionsPruned = 1
+$protected.ProtectedModules += @{ Module = 'Contoso.Tools'; Problem = "KeepVersions: '5.x' is not a version prefix such as 5 or 5.7" }
+$protected.ProtectedModules += @{ Module = 'Fabrikam.Core'; Problem = "PinnedModules: 'latest' is not a valid version" }
+$f = Get-SummaryFailures -Summary $protected
+Assert-That (($f.Config -eq 1) -and ($f.Total -eq 1)) "two modules left alone are one failure, it is the config that needs putting right (total $($f.Total))"
+
+$body = Format-HealthchecksBody -Summary $protected -Mode 'Full' -IsFailure
+Assert-That ($body -like "*- config: Contoso.Tools left alone, entry not understood: KeepVersions: '5.x' is not a version prefix such as 5 or 5.7*") 'ping body: names the module and what is wrong'
+Assert-That ($body -like '*- config: Fabrikam.Core left alone*') 'ping body: and the other one'
+Assert-That ($body -like '*Updated: 2  Pruned: 1*') 'ping body: what was done for the other modules is still reported'
+
+$script:LogLines = @()
+Send-ToastNotification -Summary $protected
+$toastLine = $script:LogLines | Where-Object { $_ -like '*Toast notification sent*' }
+Assert-That ($toastLine -like '*Updated 2 modules. Pruned 1 versions. 2 module(s) left alone, check config.json.') "toast: $toastLine"
+Assert-That ($toastLine -notlike '*No issues*') 'toast: does not say "No issues"'
+
+$older = @{ ModulesFailed = @(); PrunesFailed = @(); PinsFailed = @() }
+Assert-That ((Get-SummaryFailures -Summary $older).Config -eq 0) 'a summary without the newer keys still counts 0'
 
 Complete-Tests
