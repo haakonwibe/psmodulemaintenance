@@ -1,0 +1,1429 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PSModuleMaintenance · Technical Poster</title>
+<meta name="description" content="Keeps every PowerShell module updated and cleans up old versions, with built-in monitoring and failsafes.">
+
+<meta property="og:title" content="PSModuleMaintenance">
+<meta property="og:description" content="Keeps every PowerShell module updated and cleans up old versions, with built-in monitoring and failsafes.">
+<meta property="og:type" content="website">
+
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Archivo:wght@400;500;600;700;800;900&family=Manrope:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+
+<style>
+:root {
+  --bg: #0a0e1a;
+  --bg-2: #111726;
+  --card: #151b2c;
+  --card-hover: #1b2238;
+  --border: #232b42;
+  --border-strong: #2f3a58;
+
+  --text: #f0ede6;
+  --text-muted: #8b95a7;
+  --text-faint: #828ca0;
+
+  --accent: #34d399;         /* the green of a run that really went well */
+  --accent-2: #4cc9f0;       /* PowerShell-ish cyan */
+  --good: #34d399;
+  --bad: #ef4444;
+  --warn: #fbbf24;
+
+  --accent-rgb: 52, 211, 153;
+  --accent-2-rgb: 76, 201, 240;
+
+  --shadow-sm: 0 1px 2px rgba(0,0,0,0.3);
+  --shadow: 0 8px 24px rgba(0,0,0,0.4);
+  --shadow-lg: 0 24px 60px rgba(0,0,0,0.5);
+
+  --radius: 14px;
+  --radius-lg: 20px;
+}
+
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html {
+  scroll-behavior: smooth;
+}
+
+body {
+  font-family: 'Manrope', system-ui, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  line-height: 1.6;
+  font-weight: 400;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  overflow-x: hidden;
+}
+
+/* atmospheric background */
+body::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  background:
+    radial-gradient(ellipse at 20% 0%, rgba(var(--accent-rgb), 0.08) 0%, transparent 50%),
+    radial-gradient(ellipse at 80% 100%, rgba(var(--accent-2-rgb), 0.06) 0%, transparent 50%),
+    radial-gradient(ellipse at 50% 50%, rgba(var(--accent-rgb), 0.03) 0%, transparent 70%);
+  pointer-events: none;
+  z-index: 0;
+}
+
+/* subtle grain */
+body::after {
+  content: '';
+  position: fixed;
+  inset: 0;
+  background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noiseFilter'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noiseFilter)'/%3E%3C/svg%3E");
+  opacity: 0.04;
+  pointer-events: none;
+  z-index: 1;
+  mix-blend-mode: overlay;
+}
+
+.container {
+  position: relative;
+  z-index: 2;
+  max-width: 1280px;
+  margin: 0 auto;
+  padding: 60px 32px;
+}
+
+code.inline {
+  font-family: 'JetBrains Mono', monospace;
+  color: var(--accent-2);
+  font-size: 0.9em;
+}
+
+/* =============================================
+   HEADER
+   ============================================= */
+
+.poster-meta {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 12px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+  margin-bottom: 32px;
+}
+
+.poster-meta .dot {
+  width: 4px;
+  height: 4px;
+  background: var(--text-faint);
+  border-radius: 50%;
+}
+
+.poster-meta .meta-tag {
+  margin-left: auto;
+  padding: 6px 12px;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 100px;
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.hero {
+  margin-bottom: 80px;
+  padding: 60px 0 40px;
+  border-bottom: 1px solid var(--border);
+}
+
+.hero-grid {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 48px;
+  align-items: end;
+}
+
+h1.title {
+  font-family: 'Archivo', sans-serif;
+  font-weight: 900;
+  font-size: clamp(28px, 6.2vw, 86px);
+  line-height: 0.95;
+  letter-spacing: -0.04em;
+  color: var(--text);
+  margin-bottom: 24px;
+}
+
+h1.title .accent {
+  color: var(--accent);
+}
+
+.tagline {
+  font-family: 'Manrope', sans-serif;
+  font-size: clamp(18px, 2.2vw, 24px);
+  line-height: 1.4;
+  font-weight: 400;
+  color: var(--text-muted);
+  max-width: 720px;
+  margin-bottom: 16px;
+}
+
+.subtagline {
+  font-family: 'Archivo', sans-serif;
+  font-size: clamp(20px, 2.5vw, 28px);
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  color: var(--text);
+}
+
+.subtagline .pipe {
+  color: var(--accent);
+  margin: 0 12px;
+}
+
+.hero-stats {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  align-items: flex-end;
+}
+
+.hero-stat {
+  font-family: 'Archivo', sans-serif;
+  text-align: right;
+}
+
+.hero-stat .num {
+  font-size: 56px;
+  font-weight: 900;
+  line-height: 1;
+  letter-spacing: -0.03em;
+  background: linear-gradient(135deg, var(--accent) 0%, var(--accent-2) 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+.hero-stat.secondary {
+  opacity: 0.85;
+  margin-top: 12px;
+}
+
+.hero-stat.secondary .num {
+  font-size: 38px;
+}
+
+.hero-stat .label {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.15em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+  margin-top: 4px;
+  white-space: nowrap;
+}
+
+.tech-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 40px;
+}
+
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 100px;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text-muted);
+}
+
+.badge .dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent-2);
+}
+
+.badge.primary .dot {
+  background: var(--accent);
+}
+
+/* =============================================
+   SECTIONS
+   ============================================= */
+
+section {
+  margin-bottom: 100px;
+}
+
+.section-header {
+  display: flex;
+  align-items: baseline;
+  gap: 16px;
+  margin-bottom: 40px;
+}
+
+.section-header.with-intro {
+  margin-bottom: 0;
+}
+
+.section-num {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--accent);
+  letter-spacing: 0.1em;
+  white-space: nowrap;
+}
+
+h2 {
+  font-family: 'Archivo', sans-serif;
+  font-weight: 800;
+  font-size: clamp(32px, 4vw, 44px);
+  line-height: 1.1;
+  letter-spacing: -0.03em;
+  color: var(--text);
+}
+
+.section-intro {
+  color: var(--text-muted);
+  font-size: 17px;
+  max-width: 720px;
+  margin-top: 8px;
+  margin-bottom: 28px;
+}
+
+/* =============================================
+   COMPARISON SECTION
+   ============================================= */
+
+.compare-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 24px;
+}
+
+.compare-card {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: 28px;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.compare-card.bad {
+  border-color: rgba(239, 68, 68, 0.25);
+  background: linear-gradient(180deg, rgba(239, 68, 68, 0.04) 0%, var(--card) 100%);
+}
+
+.compare-card.good {
+  border-color: rgba(var(--accent-rgb), 0.25);
+  background: linear-gradient(180deg, rgba(var(--accent-rgb), 0.04) 0%, var(--card) 100%);
+}
+
+.compare-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  margin-bottom: 20px;
+}
+
+.compare-card.bad .compare-header { color: var(--bad); }
+.compare-card.good .compare-header { color: var(--good); }
+
+.compare-header .icon {
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.compare-card.bad .icon {
+  background: rgba(239, 68, 68, 0.15);
+  color: var(--bad);
+}
+
+.compare-card.good .icon {
+  background: rgba(var(--accent-rgb), 0.15);
+  color: var(--good);
+}
+
+pre.code {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 18px 20px;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 12.5px;
+  line-height: 1.7;
+  overflow-x: auto;
+  margin-bottom: 20px;
+  color: var(--text);
+  flex-grow: 1;
+}
+
+pre.code .comment { color: var(--text-faint); }
+pre.code .keyword { color: #c084fc; }
+pre.code .muted { color: var(--text-muted); }
+pre.code .info { color: var(--accent-2); }
+pre.code .ok { color: var(--good); }
+pre.code .warn { color: var(--warn); }
+
+.compare-points {
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.compare-points li {
+  display: flex;
+  gap: 10px;
+  font-size: 14px;
+  color: var(--text-muted);
+  line-height: 1.5;
+}
+
+.compare-points li::before {
+  flex-shrink: 0;
+  width: 18px;
+  font-family: 'JetBrains Mono', monospace;
+  font-weight: 700;
+}
+
+.compare-card.bad .compare-points li::before {
+  content: '×';
+  color: var(--bad);
+  font-size: 18px;
+  line-height: 1.4;
+}
+
+.compare-card.good .compare-points li::before {
+  content: '→';
+  color: var(--good);
+}
+
+/* =============================================
+   FEATURE GRID
+   ============================================= */
+
+.feature-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 20px;
+}
+
+.feature {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 28px;
+  position: relative;
+  overflow: hidden;
+  transition: transform 0.2s ease, border-color 0.2s ease, background 0.2s ease;
+}
+
+.feature:hover {
+  transform: translateY(-2px);
+  border-color: var(--border-strong);
+  background: var(--card-hover);
+}
+
+.feature::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 40px;
+  height: 3px;
+  background: var(--accent);
+  transition: width 0.3s ease;
+}
+
+.feature:hover::before {
+  width: 100%;
+}
+
+/* The one card that runs the full width of the grid */
+.feature.wide {
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 24px;
+  align-items: start;
+  border-color: rgba(var(--accent-rgb), 0.25);
+  background: linear-gradient(180deg, rgba(var(--accent-rgb), 0.05) 0%, var(--card) 100%);
+}
+
+.feature.wide::before {
+  width: 100%;
+}
+
+.feature.wide .feature-icon {
+  margin-bottom: 0;
+}
+
+.feature.wide p {
+  max-width: 900px;
+}
+
+.feature-meta .pair {
+  display: inline-block;
+  white-space: nowrap;
+  margin-right: 28px;
+}
+
+.feature-icon {
+  width: 44px;
+  height: 44px;
+  background: linear-gradient(135deg, rgba(var(--accent-rgb), 0.15), rgba(var(--accent-2-rgb), 0.1));
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-bottom: 20px;
+  color: var(--accent);
+}
+
+.feature-icon svg {
+  width: 22px;
+  height: 22px;
+}
+
+.feature h3 {
+  font-family: 'Archivo', sans-serif;
+  font-weight: 700;
+  font-size: 19px;
+  letter-spacing: -0.01em;
+  margin-bottom: 8px;
+  color: var(--text);
+}
+
+.feature p {
+  font-size: 14px;
+  line-height: 1.55;
+  color: var(--text-muted);
+}
+
+.feature .feature-meta {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--accent-2);
+  margin-top: 14px;
+  display: block;
+}
+
+/* =============================================
+   FLOW DIAGRAM
+   ============================================= */
+
+.flow {
+  display: grid;
+  grid-template-columns: repeat(6, 1fr);
+  gap: 12px;
+  padding: 32px 24px;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+}
+
+.flow-step {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  position: relative;
+  padding: 16px 8px;
+}
+
+.flow-step:not(:last-child)::after {
+  content: '→';
+  position: absolute;
+  right: -10px;
+  top: 50%;
+  transform: translateY(-50%);
+  font-family: 'JetBrains Mono', monospace;
+  font-weight: 700;
+  color: var(--accent);
+  font-size: 18px;
+}
+
+.flow-step .step-num {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.15em;
+  color: var(--text-faint);
+  margin-bottom: 8px;
+}
+
+.flow-step .step-icon {
+  width: 56px;
+  height: 56px;
+  background: var(--bg);
+  border: 1px solid var(--border-strong);
+  border-radius: 12px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--accent-2);
+  margin-bottom: 12px;
+}
+
+.flow-step .step-icon svg {
+  width: 26px;
+  height: 26px;
+}
+
+.flow-step .step-title {
+  font-family: 'Archivo', sans-serif;
+  font-weight: 700;
+  font-size: 14px;
+  color: var(--text);
+  margin-bottom: 4px;
+  line-height: 1.2;
+}
+
+.flow-step .step-desc {
+  font-size: 11px;
+  color: var(--text-faint);
+  font-family: 'JetBrains Mono', monospace;
+  line-height: 1.4;
+}
+
+/* =============================================
+   FAULT TABLE
+   ============================================= */
+
+.table-wrap {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  overflow-x: auto;
+  background: var(--card);
+}
+
+.comparison-table {
+  width: 100%;
+  border-collapse: separate;
+  border-spacing: 0;
+}
+
+.comparison-table th,
+.comparison-table td {
+  padding: 18px 20px;
+  text-align: left;
+  border-bottom: 1px solid var(--border);
+  font-size: 14px;
+  vertical-align: top;
+}
+
+.comparison-table thead th {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+  background: var(--bg-2);
+}
+
+.comparison-table thead th.highlight {
+  color: var(--accent);
+  background: rgba(var(--accent-rgb), 0.06);
+}
+
+.comparison-table tbody tr:last-child td {
+  border-bottom: none;
+}
+
+.comparison-table tbody td:first-child {
+  font-family: 'Archivo', sans-serif;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.comparison-table tbody td {
+  color: var(--text-muted);
+}
+
+.comparison-table tbody td.win {
+  color: var(--text);
+  background: rgba(var(--accent-rgb), 0.04);
+  font-weight: 500;
+}
+
+.comparison-table tbody td .check {
+  color: var(--good);
+  margin-right: 6px;
+  font-weight: 700;
+}
+
+/* =============================================
+   EXCEPTIONS GRID
+   ============================================= */
+
+.exceptions {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 20px;
+}
+
+.exception {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 28px 24px;
+  position: relative;
+  overflow: hidden;
+  min-width: 0;
+}
+
+.exception::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: radial-gradient(circle at top, rgba(var(--accent-rgb), 0.08), transparent 60%);
+  opacity: 0;
+  transition: opacity 0.3s ease;
+}
+
+.exception:hover::before {
+  opacity: 1;
+}
+
+.exception > * {
+  position: relative;
+  z-index: 1;
+}
+
+.exception-meta {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px;
+  letter-spacing: 0.1em;
+  color: var(--text-faint);
+  text-transform: uppercase;
+  margin-bottom: 6px;
+}
+
+.exception-name {
+  font-family: 'Archivo', sans-serif;
+  font-weight: 700;
+  font-size: 21px;
+  letter-spacing: -0.01em;
+  color: var(--text);
+  margin-bottom: 14px;
+}
+
+.exception pre {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 14px 16px;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 12.5px;
+  line-height: 1.7;
+  overflow-x: auto;
+  color: var(--text);
+  margin-bottom: 14px;
+}
+
+.exception pre .key { color: var(--accent-2); }
+.exception pre .string { color: var(--warn); }
+.exception pre .muted { color: var(--text-muted); }
+
+.exception p {
+  font-size: 14px;
+  line-height: 1.55;
+  color: var(--text-muted);
+}
+
+.exception-count {
+  display: inline-block;
+  margin-top: 14px;
+  padding: 3px 10px;
+  background: var(--accent);
+  color: var(--bg);
+  border-radius: 100px;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+}
+
+/* =============================================
+   QUICK START
+   ============================================= */
+
+.quickstart {
+  background: linear-gradient(135deg, var(--card) 0%, var(--bg-2) 100%);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-lg);
+  padding: 48px;
+  display: grid;
+  grid-template-columns: 1fr 1.5fr;
+  gap: 48px;
+  align-items: center;
+  position: relative;
+  overflow: hidden;
+}
+
+.quickstart::before {
+  content: '';
+  position: absolute;
+  top: -100px;
+  right: -100px;
+  width: 400px;
+  height: 400px;
+  background: radial-gradient(circle, rgba(var(--accent-rgb), 0.15), transparent 70%);
+  pointer-events: none;
+}
+
+.quickstart-content h2 {
+  margin-bottom: 12px;
+}
+
+.quickstart-content p {
+  color: var(--text-muted);
+  font-size: 16px;
+  margin-bottom: 24px;
+}
+
+.quickstart-meta {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 12px;
+  color: var(--text-faint);
+  letter-spacing: 0.05em;
+}
+
+.quickstart-meta .pulse {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--good);
+  box-shadow: 0 0 0 0 rgba(var(--accent-rgb), 0.5);
+  animation: pulse 2s infinite;
+}
+
+@keyframes pulse {
+  0% { box-shadow: 0 0 0 0 rgba(var(--accent-rgb), 0.5); }
+  70% { box-shadow: 0 0 0 8px rgba(var(--accent-rgb), 0); }
+  100% { box-shadow: 0 0 0 0 rgba(var(--accent-rgb), 0); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+.quickstart-code {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 24px;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 13px;
+  line-height: 1.9;
+  position: relative;
+  z-index: 1;
+  overflow-x: auto;
+  min-width: 0;
+}
+
+.quickstart-code .line {
+  display: flex;
+  gap: 16px;
+  white-space: nowrap;
+}
+
+.quickstart-code .num {
+  color: var(--text-faint);
+  user-select: none;
+  flex-shrink: 0;
+  width: 16px;
+  text-align: right;
+}
+
+.quickstart-code .prompt {
+  color: var(--accent);
+}
+
+.quickstart-code .cmd {
+  color: var(--text);
+}
+
+.quickstart-code .arg {
+  color: var(--accent-2);
+}
+
+.quickstart-code .comment {
+  color: var(--text-faint);
+}
+
+/* =============================================
+   FOOTER
+   ============================================= */
+
+footer.footer {
+  margin-top: 100px;
+  padding-top: 40px;
+  border-top: 1px solid var(--border);
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
+  gap: 40px;
+  align-items: center;
+}
+
+.footer-link {
+  color: var(--text-muted);
+  text-decoration: none;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 13px;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  transition: color 0.2s ease;
+}
+
+.footer-link:hover {
+  color: var(--accent);
+}
+
+.footer-link .arrow {
+  transition: transform 0.2s ease;
+}
+
+.footer-link:hover .arrow {
+  transform: translate(2px, -2px);
+}
+
+.footer-attrib {
+  text-align: center;
+  color: var(--text-faint);
+  font-size: 13px;
+  font-family: 'Manrope', sans-serif;
+}
+
+.footer-attrib strong {
+  color: var(--text-muted);
+  font-weight: 600;
+}
+
+.footer-version {
+  text-align: right;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 12px;
+  color: var(--text-faint);
+  letter-spacing: 0.1em;
+}
+
+/* =============================================
+   RESPONSIVE
+   ============================================= */
+
+/* The clone command is one long line, so the two columns give way early */
+@media (max-width: 1240px) {
+  .quickstart { grid-template-columns: 1fr; gap: 32px; }
+}
+
+@media (max-width: 960px) {
+  .container { padding: 40px 20px; }
+  .hero-grid { grid-template-columns: 1fr; }
+  .hero-stats { flex-direction: row; flex-wrap: wrap; align-items: flex-start; gap: 24px 32px; }
+  .hero-stat { text-align: left; }
+  .hero-stat.secondary { margin-top: 0; }
+  .compare-grid { grid-template-columns: 1fr; }
+  .feature-grid { grid-template-columns: repeat(2, 1fr); }
+  .flow { grid-template-columns: repeat(3, 1fr); }
+  .flow-step:nth-child(3n)::after { display: none; }
+  .exceptions { grid-template-columns: 1fr; }
+  .quickstart { grid-template-columns: 1fr; padding: 32px; }
+  footer.footer { grid-template-columns: 1fr; text-align: left; gap: 16px; }
+  .footer-attrib, .footer-version { text-align: left; }
+}
+
+@media (max-width: 600px) {
+  .feature.wide { grid-template-columns: 1fr; gap: 20px; }
+  .poster-meta { flex-wrap: wrap; gap: 10px 16px; }
+  .poster-meta .meta-tag { margin-left: 0; }
+  .feature-grid { grid-template-columns: 1fr; }
+  .flow { grid-template-columns: repeat(2, 1fr); }
+  .flow-step:not(:last-child)::after { display: none; }
+  .comparison-table th, .comparison-table td { padding: 12px 14px; font-size: 12px; }
+  .quickstart { padding: 24px; }
+}
+
+/* =============================================
+   PRINT
+   ============================================= */
+
+@media print {
+  body { background: white; color: black; }
+  body::before, body::after { display: none; }
+  .container { max-width: 100%; padding: 20px; }
+  .compare-card, .feature, .exception, .flow, .quickstart, .table-wrap {
+    background: white;
+    border: 1px solid #ccc;
+    box-shadow: none;
+  }
+  pre.code, .quickstart-code, .exception pre {
+    background: #f4f4f4;
+    color: black;
+  }
+  h1.title, h2, h3, .exception-name, .step-title { color: black; }
+  .tagline, .section-intro, .feature p, .exception p, .compare-points li { color: #444; }
+}
+</style>
+</head>
+<body>
+
+<div class="container">
+
+  <!-- ============================================ HEADER ============================================ -->
+  <header class="hero">
+    <div class="poster-meta">
+      <span>Open Source</span>
+      <span class="dot"></span>
+      <span>MIT License</span>
+      <span class="dot"></span>
+      <span>v3.0.0</span>
+      <span class="meta-tag">Technical Poster</span>
+    </div>
+
+    <div class="hero-grid">
+      <div>
+        <h1 class="title">PSModule<wbr><span class="accent">Maintenance</span></h1>
+        <p class="tagline">Keeps every PowerShell module updated and cleans up old versions, with built-in monitoring and failsafes.</p>
+        <p class="subtagline">Runs weekly<span class="pipe">/</span>Monitoring-ready<span class="pipe">/</span>Respects your pins</p>
+
+        <div class="tech-badges">
+          <span class="badge primary"><span class="dot"></span>PowerShell 7+</span>
+          <span class="badge"><span class="dot"></span>PSResourceGet</span>
+          <span class="badge"><span class="dot"></span>Windows 10/11</span>
+          <span class="badge"><span class="dot"></span>Task Scheduler</span>
+          <span class="badge"><span class="dot"></span>Healthchecks.io</span>
+        </div>
+      </div>
+
+      <div class="hero-stats">
+        <div class="hero-stat">
+          <div class="num">1</div>
+          <div class="label">Task a Week</div>
+        </div>
+        <div class="hero-stat">
+          <div class="num">0</div>
+          <div class="label">Modules to Install</div>
+        </div>
+        <div class="hero-stat">
+          <div class="num">8</div>
+          <div class="label">Built-in Failsafes</div>
+        </div>
+      </div>
+    </div>
+  </header>
+
+  <main>
+
+  <!-- ============================================ QUICK START ============================================ -->
+  <section>
+    <div class="quickstart">
+      <div class="quickstart-content">
+        <h2>Quick start.</h2>
+        <p>Clone, try a dry run, install the task. There is nothing to install first: PSResourceGet ships with PowerShell 7.4 and later. From then on it runs every Sunday at 03:00, and catches up when the machine was asleep.</p>
+        <div class="quickstart-meta">
+          <span class="pulse"></span>
+          <span>NO CONFIG FILE NEEDED</span>
+        </div>
+      </div>
+
+      <div class="quickstart-code">
+        <div class="line"><span class="num">1</span><span class="prompt">$</span> <span class="cmd">git clone</span> <span class="arg">https://github.com/haakonwibe/psmodulemaintenance.git</span></div>
+        <div class="line"><span class="num">2</span><span class="prompt">$</span> <span class="cmd">.\Invoke-PSModuleMaintenance.ps1</span> <span class="arg">-WhatIf</span></div>
+        <div class="line"><span class="num">3</span><span class="prompt">$</span> <span class="cmd">.\Install-ModuleMaintenance.ps1</span></div>
+        <div class="line"><span class="num">&nbsp;</span><span class="comment"># step 3 as Administrator, it registers the weekly task</span></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============================================ COMPARISON ============================================ -->
+  <section>
+    <div class="section-header">
+      <span class="section-num">// 01</span>
+      <h2>Built differently.</h2>
+    </div>
+
+    <div class="compare-grid">
+      <div class="compare-card bad">
+        <div class="compare-header">
+          <span class="icon">×</span>
+          <span>A one-liner in a scheduled task</span>
+        </div>
+        <pre class="code"><span class="comment"># The usual answer: one line, once a week</span>
+
+<span class="muted">PS&gt;</span> <span class="keyword">Update-PSResource</span> -Name *
+
+<span class="comment"># New versions land next to the old ones</span>
+<span class="comment"># Nothing ever removes the old ones</span>
+<span class="comment"># One slow module holds up all that follow</span>
+<span class="comment"># Errors go to a window nobody sees</span>
+<span class="comment"># No log, no summary, no alert</span></pre>
+        <ul class="compare-points">
+          <li>Old versions pile up, side by side</li>
+          <li>One module that hangs blocks the rest of the run</li>
+          <li>A run that checked nothing looks like a quiet week</li>
+          <li>A task that never starts leaves no trace at all</li>
+        </ul>
+      </div>
+
+      <div class="compare-card good">
+        <div class="compare-header">
+          <span class="icon">✓</span>
+          <span>PSModuleMaintenance</span>
+        </div>
+        <pre class="code"><span class="muted">PS&gt;</span> <span class="keyword">.\Invoke-PSModuleMaintenance.ps1</span>
+
+<span class="info">[INFO]</span> Found 78 installed modules (excluding: Az.Accounts)
+<span class="warn">[WARN]</span> Network fault on Contoso.Tools (attempt 1 of 3): ...
+<span class="ok">[SUCCESS]</span> Updated: Contoso.Tools (took 9s)
+<span class="info">[INFO]</span> Updating kept line 5 of Pester: 5.5.0 -&gt; 5.6.1
+<span class="ok">[SUCCESS]</span> Removed: Pester v5.5.0
+<span class="info">[INFO]</span> Healthchecks ping sent: Success
+<span class="ok">[SUCCESS]</span> PSModuleMaintenance completed successfully</pre>
+        <ul class="compare-points">
+          <li>Every update has a timeout, and a retry after a network fault</li>
+          <li>Old versions are pruned, except the ones you asked to keep</li>
+          <li>The log, the toast and the ping always agree on how it went</li>
+          <li>A missing ping raises the alarm when nothing ran at all</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============================================ FEATURES ============================================ -->
+  <section>
+    <div class="section-header">
+      <span class="section-num">// 02</span>
+      <h2>What it does.</h2>
+    </div>
+
+    <div class="feature-grid">
+
+      <div class="feature wide">
+        <div class="feature-icon">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><polygon points="12 2 2 7 12 12 22 7 12 2"/><polyline points="2 17 12 22 22 17"/><polyline points="2 12 12 17 22 12"/></svg>
+        </div>
+        <div>
+          <h3>Microsoft.Graph and Az</h3>
+          <p>Works with the large module collections. Updates and cleans up every sub-module.</p>
+          <span class="feature-meta"><span class="pair">Az // 100+ modules</span><span class="pair">Microsoft.Graph // about 40</span></span>
+        </div>
+      </div>
+
+      <div class="feature">
+        <div class="feature-icon">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M21 12a9 9 0 0 1-9 9 9 9 0 0 1-6.36-2.64L3 21"/><path d="M3 12a9 9 0 0 1 9-9 9 9 0 0 1 6.36 2.64L21 3"/><polyline points="21 3 21 9 15 9"/><polyline points="3 21 3 15 9 15"/></svg>
+        </div>
+        <h3>Automatic updates</h3>
+        <p>Updates all installed modules via PSResourceGet.</p>
+        <span class="feature-meta">Runs weekly</span>
+      </div>
+
+      <div class="feature">
+        <div class="feature-icon">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg>
+        </div>
+        <h3>Version cleanup</h3>
+        <p>Removes old module versions, keeps only the latest.</p>
+        <span class="feature-meta">Every week</span>
+      </div>
+
+      <div class="feature">
+        <div class="feature-icon">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+        </div>
+        <h3>Pinning and exclusions</h3>
+        <p>Hold a module at a chosen version, keep an older version, or skip the module.</p>
+        <span class="feature-meta">Set in config.json</span>
+      </div>
+
+      <div class="feature">
+        <div class="feature-icon">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+        </div>
+        <h3>Timeout and retry</h3>
+        <p>Time limit on every update. Network errors are retried.</p>
+        <span class="feature-meta">10 minutes // 3 attempts</span>
+      </div>
+
+      <div class="feature">
+        <div class="feature-icon">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="m9 12 2 2 4-4"/></svg>
+        </div>
+        <h3>Failsafes</h3>
+        <p>Stops before any module is touched if <code class="inline">config.json</code> has errors.</p>
+        <span class="feature-meta">8 built in</span>
+      </div>
+
+      <div class="feature">
+        <div class="feature-icon">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+        </div>
+        <h3>Error reporting</h3>
+        <p>Errors show up in the log, the toast and the monitoring.</p>
+        <span class="feature-meta">Log // Toast // Ping</span>
+      </div>
+
+      <div class="feature">
+        <div class="feature-icon">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>
+        </div>
+        <h3>Monitoring</h3>
+        <p>Optional Healthchecks.io monitoring. Alerts if a run fails or never starts.</p>
+        <span class="feature-meta">Off by default</span>
+      </div>
+
+      <div class="feature">
+        <div class="feature-icon">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/></svg>
+        </div>
+        <h3>Logging</h3>
+        <p>Log file, transcript and JSON summary for every run.</p>
+        <span class="feature-meta">Opens in CMTrace</span>
+      </div>
+
+      <div class="feature">
+        <div class="feature-icon">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z"/></svg>
+        </div>
+        <h3>OneDrive migration</h3>
+        <p>Moves modules out of OneDrive-synced folders to AllUsers scope.</p>
+        <span class="feature-meta">One-time script</span>
+      </div>
+
+    </div>
+  </section>
+
+  <!-- ============================================ FLOW ============================================ -->
+  <section>
+    <div class="section-header with-intro">
+      <span class="section-num">// 03</span>
+      <h2>How it works.</h2>
+    </div>
+    <p class="section-intro">What one weekly run does, in order. The summary is saved after every phase, so a run that is cut short still leaves its results behind.</p>
+
+    <div class="flow">
+      <div class="flow-step">
+        <div class="step-num">01</div>
+        <div class="step-icon">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/><path d="M9 13h6"/><path d="M9 17h6"/></svg>
+        </div>
+        <div class="step-title">Load config</div>
+        <div class="step-desc">config.json<br>or the defaults</div>
+      </div>
+
+      <div class="flow-step">
+        <div class="step-num">02</div>
+        <div class="step-icon">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+        </div>
+        <div class="step-title">Look up</div>
+        <div class="step-desc">One query<br>to PSGallery</div>
+      </div>
+
+      <div class="flow-step">
+        <div class="step-num">03</div>
+        <div class="step-icon">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+        </div>
+        <div class="step-title">Update</div>
+        <div class="step-desc">Timeout and retry<br>per module</div>
+      </div>
+
+      <div class="flow-step">
+        <div class="step-num">04</div>
+        <div class="step-icon">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg>
+        </div>
+        <div class="step-title">Prune</div>
+        <div class="step-desc">Newest, pin and<br>kept lines stay</div>
+      </div>
+
+      <div class="flow-step">
+        <div class="step-num">05</div>
+        <div class="step-icon">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>
+        </div>
+        <div class="step-title">Report</div>
+        <div class="step-desc">Log, summary<br>and toast</div>
+      </div>
+
+      <div class="flow-step">
+        <div class="step-num">06</div>
+        <div class="step-icon">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>
+        </div>
+        <div class="step-title">Ping</div>
+        <div class="step-desc">Success<br>or fail</div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============================================ FAULT TABLE ============================================ -->
+  <section>
+    <div class="section-header with-intro">
+      <span class="section-num">// 04</span>
+      <h2>Eight built-in failsafes.</h2>
+    </div>
+    <p class="section-intro">What the run does when something breaks, and how you find out. The log is always written, the toast and the ping are optional.</p>
+
+    <div class="table-wrap">
+      <table class="comparison-table">
+        <thead>
+          <tr>
+            <th>What happens</th>
+            <th class="highlight">What the run does</th>
+            <th>How you hear about it</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>PSGallery cannot be reached</td>
+            <td class="win"><span class="check">✓</span>Retries the lookup, then prunes only. Nothing is called up to date</td>
+            <td>Log, toast and fail ping</td>
+          </tr>
+          <tr>
+            <td>The network drops during an update</td>
+            <td class="win"><span class="check">✓</span>Tries again after 5 and then 15 seconds</td>
+            <td>A warning in the log. A failure only if all three attempts fail</td>
+          </tr>
+          <tr>
+            <td>A module takes longer than its timeout</td>
+            <td class="win"><span class="check">✓</span>Gives up on that module and goes on with the next</td>
+            <td>Log, toast and fail ping</td>
+          </tr>
+          <tr>
+            <td>The config file cannot be read</td>
+            <td class="win"><span class="check">✓</span>Touches no module and removes no log</td>
+            <td>Log, toast and fail ping</td>
+          </tr>
+          <tr>
+            <td>One config entry is not understood</td>
+            <td class="win"><span class="check">✓</span>Leaves that module alone and maintains the rest</td>
+            <td>Log, toast and fail ping, until the entry is put right</td>
+          </tr>
+          <tr>
+            <td>A pinned version is not installed</td>
+            <td class="win"><span class="check">✓</span>Installs it, and prunes nothing of that module if it cannot</td>
+            <td>A line in the log. A failure only if the install does not succeed</td>
+          </tr>
+          <tr>
+            <td>PowerShell moves to another folder</td>
+            <td class="win"><span class="check">✓</span>The task finds <code class="inline">pwsh.exe</code> through PATH at every run</td>
+            <td>A warning if an older task still has a fixed path</td>
+          </tr>
+          <tr>
+            <td>The task never starts</td>
+            <td class="win"><span class="check">✓</span>Nothing runs, so nothing on the machine can report it</td>
+            <td>Healthchecks alerts on the missing ping</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- ============================================ EXCEPTIONS ============================================ -->
+  <section>
+    <div class="section-header with-intro">
+      <span class="section-num">// 05</span>
+      <h2>Three ways to make an exception.</h2>
+    </div>
+    <p class="section-intro">Every module is updated and pruned unless <code class="inline">config.json</code> says otherwise. Pinning and keeping combine, and excluding wins over both.</p>
+
+    <div class="exceptions">
+      <div class="exception">
+        <div class="exception-meta">Leave it alone</div>
+        <div class="exception-name">ExcludedModules</div>
+<pre><span class="key">"ExcludedModules"</span><span class="muted">:</span> [
+  <span class="string">"Contoso.Tools"</span>
+]</pre>
+        <p>The module is not updated and not pruned. For a module you manage yourself.</p>
+        <span class="exception-count">NOTHING CHANGES</span>
+      </div>
+
+      <div class="exception">
+        <div class="exception-meta">Hold one version</div>
+        <div class="exception-name">PinnedModules</div>
+<pre><span class="key">"PinnedModules"</span><span class="muted">:</span> {
+  <span class="key">"Az.Accounts"</span><span class="muted">:</span> <span class="string">"2.19.0"</span>
+}</pre>
+        <p>The pinned version is installed if it is missing, and newer versions are pruned. For a release that broke something.</p>
+        <span class="exception-count">ONE VERSION</span>
+      </div>
+
+      <div class="exception">
+        <div class="exception-meta">Keep an older line</div>
+        <div class="exception-name">KeepVersions</div>
+<pre><span class="key">"KeepVersions"</span><span class="muted">:</span> {
+  <span class="key">"Pester"</span><span class="muted">:</span> [<span class="string">"5"</span>]
+}</pre>
+        <p>The newest version and the 5 line are both kept, and both are updated, each within itself. For a breaking major release.</p>
+        <span class="exception-count">TWO LINES, BOTH CURRENT</span>
+      </div>
+    </div>
+  </section>
+
+  </main>
+
+  <!-- ============================================ FOOTER ============================================ -->
+  <footer class="footer">
+    <a href="https://github.com/haakonwibe/psmodulemaintenance" class="footer-link">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 .297c-6.63 0-12 5.373-12 12 0 5.303 3.438 9.8 8.205 11.385.6.113.82-.258.82-.577 0-.285-.01-1.04-.015-2.04-3.338.724-4.042-1.61-4.042-1.61C4.422 18.07 3.633 17.7 3.633 17.7c-1.087-.744.084-.729.084-.729 1.205.084 1.838 1.236 1.838 1.236 1.07 1.835 2.809 1.305 3.495.998.108-.776.417-1.305.76-1.605-2.665-.3-5.466-1.332-5.466-5.93 0-1.31.465-2.38 1.235-3.22-.135-.303-.54-1.523.105-3.176 0 0 1.005-.322 3.3 1.23.96-.267 1.98-.4 3-.405 1.02.005 2.04.138 3 .405 2.28-1.552 3.285-1.23 3.285-1.23.645 1.653.24 2.873.12 3.176.765.84 1.23 1.91 1.23 3.22 0 4.61-2.805 5.625-5.475 5.92.42.36.81 1.096.81 2.22 0 1.606-.015 2.896-.015 3.286 0 .315.21.69.825.57C20.565 22.092 24 17.592 24 12.297c0-6.627-5.373-12-12-12"/></svg>
+      <span>github.com/haakonwibe/psmodulemaintenance</span>
+      <span class="arrow">↗</span>
+    </a>
+
+    <div class="footer-attrib">
+      Created by <strong>Haakon Wibe</strong> · Digital Workplace Architect
+    </div>
+
+    <div class="footer-version">v3.0.0 · MIT</div>
+  </footer>
+
+</div>
+
+</body>
+</html>

@@ -2,6 +2,10 @@
 
 Automated PowerShell module maintenance for Windows. Updates all PSResourceGet-managed modules and prunes old versions on a weekly schedule with comprehensive logging.
 
+[![PSModuleMaintenance poster](site/poster.png)](https://haakonwibe.github.io/psmodulemaintenance/)
+
+> 🌐 Live interactive version: <https://haakonwibe.github.io/psmodulemaintenance/>
+
 ## Features
 
 - 🔄 **Automatic Updates** — Updates all installed PowerShell modules via PSResourceGet
@@ -17,7 +21,7 @@ Automated PowerShell module maintenance for Windows. Updates all PSResourceGet-m
 - 🔁 **Retry on Network Faults** — A dropped connection or gateway hiccup is retried (up to three attempts) instead of costing the module a week
 - 📡 **Healthchecks.io Monitoring** — Optional dead-man's switch that alerts when a scheduled run never happens, not just when one fails
 - 🚦 **No False Green** — An unreachable PSGallery, a skipped module or a config problem is reported as unsuccessful in the log, the toast and the ping, never as "up to date"
-- 🧯 **Cautious When Unsure** — A `config.json` that cannot be read stops the run before any module is touched, and a single entry that is not understood leaves that module alone
+- 🧯 **Built-in Failsafes** — A typo in `config.json` never costs you a module: a file that cannot be read stops the run before anything is touched, and a bad entry takes only that module out of the run
 - 🤝 **Leaves Other Programs' Modules Alone** — A module that another program installed and maintains is neither migrated nor pruned
 - 🧪 **Tests Included** — The fault paths a normal run never reaches are covered by tests that need no network and no elevation
 
