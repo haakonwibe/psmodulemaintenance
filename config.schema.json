@@ -28,8 +28,8 @@
       "description": "Modules held at a specific version. The pinned version is installed if missing, and pruning keeps it instead of the newest version. A module listed in ExcludedModules is skipped entirely and its pin is ignored.",
       "additionalProperties": {
         "type": "string",
-        "description": "Exact version to hold, optionally with a prerelease label (e.g. 2.19.0 or 2.0.0-beta1)",
-        "pattern": "^\\d+(\\.\\d+){0,3}(-[A-Za-z0-9.]+)?$"
+        "description": "Exact version to hold, with at least two numbers and optionally a prerelease label (e.g. 2.19.0 or 2.0.0-beta1). A single number such as 2 is not a version; to keep a whole line, use KeepVersions.",
+        "pattern": "^\\d+(\\.\\d+){1,3}(-[A-Za-z0-9.]+)?$"
       },
       "default": {},
       "examples": [

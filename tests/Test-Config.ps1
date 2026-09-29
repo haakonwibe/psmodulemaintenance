@@ -34,6 +34,7 @@ function Get-ScriptAssignmentText {
 function Reset-Config {
     . ([scriptblock]::Create((Get-ScriptAssignmentText -Path $script:MainScript -Variable '$script:Config')))
     $script:ConfigWarnings = @()
+    $script:ConfigNotes = @()
     $script:ConfigFault = $null
     $script:ProtectedModules = @{}
     $script:ConfigBadEntries = @()
@@ -41,7 +42,7 @@ function Reset-Config {
 
 $wanted = 'ConvertTo-NormalizedVersion', 'Get-ModuleVersionKey', 'ConvertFrom-PinnedVersionString',
           'ConvertTo-PinnedModuleTable', 'ConvertFrom-KeepVersionSelector', 'ConvertTo-KeepVersionTable',
-          'Import-MaintenanceConfig'
+          'Assert-ConfigWholeNumber', 'Assert-ConfigShape', 'Import-MaintenanceConfig'
 foreach ($name in $wanted) {
     . ([scriptblock]::Create((Get-ScriptFunctionText -Path $script:MainScript -Name $name)))
 }
@@ -95,13 +96,15 @@ Assert-That (($templateKeys -join ',') -eq ($defaultKeys -join ',')) 'the templa
 # --- No config file at all -----------------------------------------------------------
 Write-Section 'Running without config.json'
 
+# Only the default path may be missing. That case is run in Test-ConfigFault.ps1, on a
+# copy of the script in a temp folder, since here the default is next to the real one
 Reset-Config
 $threw = $false
 $missing = Join-Path ([System.IO.Path]::GetTempPath()) ('no-such-config-' + [guid]::NewGuid().ToString('N') + '.json')
 try { Import-MaintenanceConfig -Path $missing } catch { $threw = $true }
-Assert-That (-not $threw) 'a missing file is not an error'
-Assert-That ($script:Config.Healthchecks.Enabled -eq $false) 'Healthchecks stays off'
-Assert-That ($script:Config.ModuleUpdateTimeoutSeconds -eq $defaults.ModuleUpdateTimeoutSeconds) 'the defaults are in force'
+Assert-That (-not $threw) 'a named file that is missing does not throw'
+Assert-That ($script:ConfigFault -eq "There is no config file at $missing") 'but it is a fault, most likely a typo in the path'
+Assert-That ($script:Config.ModuleUpdateTimeoutSeconds -eq $defaults.ModuleUpdateTimeoutSeconds) 'nothing is loaded'
 
 # --- Loading KeepVersions ------------------------------------------------------------
 Write-Section 'Loading KeepVersions'
@@ -240,10 +243,73 @@ try {
     Import-TestConfig '{ "LogRetentionDays": 30 }'
     Assert-That ($null -eq $script:ConfigFault) 'a file that can be read records no fault'
 
+    # Each of these reads without a parse error, and used to leave the run on defaults
+    Import-TestConfig ''
+    Assert-That ($script:ConfigFault -like 'the file has to hold a JSON object*') 'an empty file: the file counts as unreadable'
+    Import-TestConfig 'null'
+    Assert-That ($script:ConfigFault -like 'the file has to hold a JSON object*') 'a bare null: the same'
+    Import-TestConfig '"Contoso.Tools"'
+    Assert-That ($script:ConfigFault -like 'the file has to hold a JSON object*') 'a bare string: the same'
+    Import-TestConfig '["Contoso.Tools"]'
+    Assert-That ($script:ConfigFault -like 'the file has to hold a JSON object*') 'a bare list: the same'
+
+    # --- A setting that is misspelled or out of range --------------------------------
+    Write-Section 'A setting that is misspelled or out of range'
+
+    Import-TestConfig '{ "ExcludedModule": ["Contoso.Tools"] }'
+    Assert-That ($script:ConfigFault -like "unknown setting 'ExcludedModule'*") 'a misspelled setting: the file counts as unreadable, and the fault names it'
+    Import-TestConfig '{ "Healthchecks": { "Enable": true } }'
+    Assert-That ($script:ConfigFault -like "unknown Healthchecks setting 'Enable'*") 'a misspelled Healthchecks setting: the same'
+    Import-TestConfig '{ "excludedmodules": ["Contoso.Tools"] }'
+    Assert-That (($null -eq $script:ConfigFault) -and (@($script:Config.ExcludedModules) -contains 'Contoso.Tools')) 'a setting in other case is known, and in force'
+
+    foreach ($bad in '0', '-1', '1.5', '"30"', '366') {
+        Import-TestConfig "{ `"LogRetentionDays`": $bad }"
+        Assert-That ($script:ConfigFault -like 'LogRetentionDays has to be a whole number from 1 to 365*') "LogRetentionDays $bad`: the file counts as unreadable, 0 would remove every log"
+    }
+    Import-TestConfig '{ "LogRetentionDays": 365 }'
+    Assert-That (($null -eq $script:ConfigFault) -and ($script:Config.LogRetentionDays -eq 365)) 'LogRetentionDays 365 is in range'
+
+    Import-TestConfig '{ "ModuleUpdateTimeoutSeconds": 10 }'
+    Assert-That ($script:ConfigFault -like 'ModuleUpdateTimeoutSeconds has to be*') 'a timeout below the schema minimum: the same'
+    Import-TestConfig '{ "NotificationMode": "Sometimes" }'
+    Assert-That ($script:ConfigFault -like 'NotificationMode has to be*') 'a NotificationMode the script does not know: the same'
+    Import-TestConfig '{ "TrustPSGallery": "yes" }'
+    Assert-That ($script:ConfigFault -like 'TrustPSGallery has to be*') 'TrustPSGallery as text: the same'
+    Import-TestConfig '{ "Healthchecks": { "Enabled": "true" } }'
+    Assert-That ($script:ConfigFault -like 'Healthchecks.Enabled has to be*') 'Healthchecks.Enabled as text: the same'
+    Import-TestConfig '{ "Healthchecks": { "TimeoutSeconds": 0 } }'
+    Assert-That ($script:ConfigFault -like 'Healthchecks.TimeoutSeconds has to be*') 'Healthchecks.TimeoutSeconds 0: the same'
+
+    # --- Where the file is ------------------------------------------------------------
+    Write-Section 'Where the file is'
+
+    # [ and ] are wildcard characters to -Path. The file was not found, and the run went on
+    # as if there were none
+    $bracketFolder = Join-Path $configFolder '[work]'
+    [System.IO.Directory]::CreateDirectory($bracketFolder) | Out-Null
+    $bracketConfig = Join-Path $bracketFolder 'config.json'
+    Set-Content -LiteralPath $bracketConfig -Value '{ "ExcludedModules": ["Contoso.Tools"] }'
     Reset-Config
-    $missing = Join-Path $configFolder 'there-is-no-such-file.json'
-    Import-MaintenanceConfig -Path $missing
-    Assert-That ($null -eq $script:ConfigFault) 'a file that does not exist is not a fault: the defaults are what was asked for'
+    Import-MaintenanceConfig -Path $bracketConfig
+    Assert-That (($null -eq $script:ConfigFault) -and (@($script:Config.ExcludedModules) -contains 'Contoso.Tools')) 'a file in a folder with [ ] in its name is found and read'
+
+    Reset-Config
+    Import-MaintenanceConfig -Path (Join-Path $configFolder 'there-is-no-such-file.json')
+    Assert-That ($script:ConfigFault -like 'There is no config file at *there-is-no-such-file.json') 'a named file that does not exist is a fault'
+
+    # --- The schema and the parser agree on what a pin is ----------------------------
+    Write-Section 'Pins: schema and parser'
+
+    # A pin the schema accepts and the parser rejects leaves the module alone for good,
+    # while Test-Json says the file is fine
+    foreach ($pin in '2', '2.19', '2.19.0', '2.19.0.1', '2.0.0-beta1', '2.19.0.0.0', '2.*', 'latest') {
+        $json = "{ `"PinnedModules`": { `"Contoso.Tools`": `"$pin`" } }"
+        $bySchema = $false
+        try { $bySchema = Test-Json -Json $json -SchemaFile $schemaPath -ErrorAction Stop } catch { $bySchema = $false }
+        $byParser = $null -ne (ConvertFrom-PinnedVersionString $pin)
+        Assert-That ($bySchema -eq $byParser) "'$pin': schema $bySchema, parser $byParser"
+    }
 }
 finally {
     if (Test-Path -LiteralPath $configFolder) {

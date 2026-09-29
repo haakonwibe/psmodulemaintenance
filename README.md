@@ -164,6 +164,8 @@ Run the maintenance script directly:
 
 A `config.json` that is there but cannot be read, because of a typo or a half-saved edit,
 stops the run before it touches anything. **No module is updated and no version is pruned.**
+The same goes for a file that is empty, a setting name the script does not know (such as
+`ExcludedModule`), and a value outside what `config.schema.json` allows.
 
 Going on would mean running on the built-in defaults, under which nothing is excluded,
 pinned or kept. Every module would be updated and every old version removed, including the
@@ -190,7 +192,8 @@ Test-Json -Path .\config.json -SchemaFile .\config.schema.json
 ```
 
 A `config.json` that does not exist is a different matter and not a problem: the script
-then runs on the built-in defaults, as it always has.
+then runs on the built-in defaults, as it always has, and the log says so. This only holds
+for the default file next to the script. A file named with `-ConfigPath` has to exist.
 
 ### If a single entry is not understood
 

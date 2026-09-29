@@ -19,7 +19,8 @@
 
 .PARAMETER ConfigPath
     Path to the JSON configuration file. Defaults to script directory's config.json.
-    Without such a file the built-in defaults are used.
+    Without such a file the built-in defaults are used. A file named here has to exist:
+    if it does not, no module is touched.
 
 .PARAMETER LogPath
     Base path for logs. Defaults to $env:ProgramData\PSModuleMaintenance\Logs
@@ -88,6 +89,7 @@ $script:Config = @{
 # Config is loaded before logging starts, so problems found there are queued and
 # written to the log once Initialize-Logging has run
 $script:ConfigWarnings = @()
+$script:ConfigNotes = @()
 
 # Why the config file could not be read, if it could not. When this is set the run
 # touches no module at all: without the config it is not known which modules are
@@ -241,17 +243,98 @@ function Get-UntouchedModuleNames {
     return @($script:Config.ExcludedModules) + @($script:ProtectedModules.Keys)
 }
 
+function Assert-ConfigWholeNumber {
+    <#
+    .SYNOPSIS
+        Throws unless a setting is a whole number within the range config.schema.json allows.
+        A setting that is not there ($null) passes, the default is then used.
+    #>
+    [CmdletBinding()]
+    param([string]$Name, $Value, [long]$Minimum, [long]$Maximum)
+
+    if ($null -eq $Value) { return }
+    if ((($Value -isnot [int]) -and ($Value -isnot [long])) -or ($Value -lt $Minimum) -or ($Value -gt $Maximum)) {
+        throw "$Name has to be a whole number from $Minimum to $Maximum, not '$Value'"
+    }
+}
+
+function Assert-ConfigShape {
+    <#
+    .SYNOPSIS
+        Throws unless the file as a whole, and each setting that is not about single
+        modules, has the shape config.schema.json describes.
+
+    .NOTES
+        Anything that fails here makes the whole file count as unreadable, and the run
+        touches no module. Each of these would otherwise pass without a word and leave
+        the run on a default: an empty file or a bare null reads as no settings at all,
+        and a misspelled setting name is simply never looked at, so the modules it was
+        about would be treated like any other. The entries about single modules are
+        checked where they are read, since a bad one of those protects only its module.
+    #>
+    [CmdletBinding()]
+    param($JsonConfig)
+
+    # The full type name: [PSCustomObject] means [psobject], which a bare string or list
+    # from the pipeline also is
+    if ($JsonConfig -isnot [System.Management.Automation.PSCustomObject]) {
+        throw 'the file has to hold a JSON object, such as { "ExcludedModules": [] }. It is empty or holds something else'
+    }
+
+    $known = @('$schema', '_comment') + @($script:Config.Keys)
+    $unknown = @($JsonConfig.PSObject.Properties.Name | Where-Object { $_ -notin $known })
+    if ($unknown.Count -gt 0) {
+        throw "unknown setting '$($unknown -join "', '")'. Check the spelling against config.schema.json"
+    }
+
+    Assert-ConfigWholeNumber -Name 'LogRetentionDays' -Value $JsonConfig.LogRetentionDays -Minimum 1 -Maximum 365
+    Assert-ConfigWholeNumber -Name 'ModuleUpdateTimeoutSeconds' -Value $JsonConfig.ModuleUpdateTimeoutSeconds -Minimum 60 -Maximum 3600
+
+    if (($null -ne $JsonConfig.TrustPSGallery) -and ($JsonConfig.TrustPSGallery -isnot [bool])) {
+        throw 'TrustPSGallery has to be true or false'
+    }
+    if (($null -ne $JsonConfig.NotificationMode) -and ($JsonConfig.NotificationMode -notin 'Always', 'OnFailure', 'Never')) {
+        throw "NotificationMode has to be Always, OnFailure or Never, not '$($JsonConfig.NotificationMode)'"
+    }
+
+    $hc = $JsonConfig.Healthchecks
+    if ($null -ne $hc) {
+        if ($hc -isnot [System.Management.Automation.PSCustomObject]) {
+            throw 'Healthchecks has to be an object, such as { "Enabled": true }'
+        }
+        $unknown = @($hc.PSObject.Properties.Name | Where-Object { $_ -notin $script:Config.Healthchecks.Keys })
+        if ($unknown.Count -gt 0) {
+            throw "unknown Healthchecks setting '$($unknown -join "', '")'. Check the spelling against config.schema.json"
+        }
+        if (($null -ne $hc.Enabled) -and ($hc.Enabled -isnot [bool])) {
+            throw 'Healthchecks.Enabled has to be true or false'
+        }
+        foreach ($name in 'SecretName', 'SecretVault') {
+            if (($null -ne $hc.$name) -and (($hc.$name -isnot [string]) -or [string]::IsNullOrWhiteSpace($hc.$name))) {
+                throw "Healthchecks.$name has to be a name in quotes"
+            }
+        }
+        Assert-ConfigWholeNumber -Name 'Healthchecks.TimeoutSeconds' -Value $hc.TimeoutSeconds -Minimum 1 -Maximum 120
+    }
+}
+
 function Import-MaintenanceConfig {
     [CmdletBinding()]
     param([string]$Path)
 
-    if ([string]::IsNullOrEmpty($Path)) {
+    # A path the caller named has to be there. Only the default one may be missing
+    $named = -not [string]::IsNullOrEmpty($Path)
+    if (-not $named) {
         $Path = Join-Path $PSScriptRoot 'config.json'
     }
 
-    if (Test-Path $Path) {
+    # -LiteralPath throughout: a folder name with [ or ] in it is a wildcard pattern
+    # otherwise, the file is never found, and the run goes on as if there were none
+    if (Test-Path -LiteralPath $Path) {
         try {
-            $jsonConfig = Get-Content $Path -Raw | ConvertFrom-Json
+            $jsonConfig = Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json
+
+            Assert-ConfigShape $jsonConfig
 
             $script:ConfigBadEntries = @()
             $script:ProtectedModules = @{}
@@ -353,8 +436,15 @@ function Import-MaintenanceConfig {
             $script:ConfigFault = $_.Exception.Message
         }
     }
+    elseif ($named) {
+        # Asked for by name and not there: most likely a typo in the path. Running on the
+        # defaults instead would update and prune what that file was written to protect
+        $script:ConfigFault = "There is no config file at $Path"
+    }
     else {
-        Write-Verbose "No config file found at $Path. Using defaults."
+        # Not a fault, the defaults are what was asked for. But on a machine that had a
+        # config it is a sign the file was lost, so the log says so
+        $script:ConfigNotes += "No config file at $Path. Running on the built-in defaults"
     }
 }
 
@@ -2818,6 +2908,9 @@ try {
     Initialize-Logging -BasePath $LogPath
 
     # Surface anything the config parser flagged before the log file existed
+    foreach ($configNote in $script:ConfigNotes) {
+        Write-Log $configNote
+    }
     foreach ($configWarning in $script:ConfigWarnings) {
         Write-Log $configWarning -Level WARN
     }

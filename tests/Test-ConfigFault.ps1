@@ -355,17 +355,45 @@ try {
     # --- A file that is simply not there ---------------------------------------------
     Write-Section 'No config file at all'
 
+    # Only the default path may be missing, and the default is next to the script. So a
+    # copy of the script runs from a temp folder, where there is no config.json
     $folder = Join-Path $root 'no-config'
+    $logFolder = Join-Path $folder 'Logs'
+    New-Item -Path $logFolder -ItemType Directory -Force | Out-Null
+    $scriptCopy = Join-Path $folder (Split-Path $script:MainScript -Leaf)
+    Copy-Item -LiteralPath $script:MainScript -Destination $scriptCopy
+    $callsPath = Join-Path $folder 'calls.txt'
+    Set-Content -LiteralPath $callsPath -Value 'started'
+    & pwsh -NoProfile -NonInteractive -File $runnerPath -ScriptPath $scriptCopy `
+        -LogPath $logFolder -CallsPath $callsPath -Mode 'WhatIf' *> $null
+    $noConfigLog = @(Get-ChildItem -LiteralPath $logFolder -Filter 'maintenance_*.log' | Get-Content |
+        ForEach-Object { $_ -replace '^\[[\d\- :]+\] ', '' })
+    Assert-That ($noConfigLog -contains '[INFO] Starting module updates...') 'the run goes ahead on the built-in defaults, as documented'
+    Assert-That (@($noConfigLog | Where-Object { $_ -like '*Could not read the config file*' }).Count -eq 0) 'a missing file is not an unreadable one'
+    Assert-That ($noConfigLog -contains "[INFO] No config file at $(Join-Path $folder 'config.json'). Running on the built-in defaults") 'but the log says the file is not there'
+
+    # A path the caller named has to be there: a typo must not mean running on defaults
+    $folder = Join-Path $root 'named-config-missing'
     $logFolder = Join-Path $folder 'Logs'
     New-Item -Path $logFolder -ItemType Directory -Force | Out-Null
     $callsPath = Join-Path $folder 'calls.txt'
     Set-Content -LiteralPath $callsPath -Value 'started'
     & pwsh -NoProfile -NonInteractive -File $runnerPath -ScriptPath $script:MainScript `
-        -ConfigPath (Join-Path $folder 'config.json') -LogPath $logFolder -CallsPath $callsPath -Mode 'WhatIf' *> $null
-    $noConfigLog = @(Get-ChildItem -LiteralPath $logFolder -Filter 'maintenance_*.log' | Get-Content |
+        -ConfigPath (Join-Path $folder 'config.jsn') -LogPath $logFolder -CallsPath $callsPath *> $null
+    $namedLog = @(Get-ChildItem -LiteralPath $logFolder -Filter 'maintenance_*.log' | Get-Content |
         ForEach-Object { $_ -replace '^\[[\d\- :]+\] ', '' })
-    Assert-That ($noConfigLog -contains '[INFO] Starting module updates...') 'the run goes ahead on the built-in defaults, as documented'
-    Assert-That (@($noConfigLog | Where-Object { $_ -like '*Could not read the config file*' }).Count -eq 0) 'a missing file is not an unreadable one'
+    Assert-That ((Get-TouchingCalls @(Get-Content -LiteralPath $callsPath)).Count -eq 0) 'a named config file that is missing: no module is touched'
+    Assert-That ($namedLog -contains "[ERROR] Could not read the config file: There is no config file at $(Join-Path $folder 'config.jsn')") 'and the log says which file'
+
+    # Each of these reads without a parse error, and used to run on the built-in defaults
+    foreach ($case in @(
+            @{ Text = '';                                          What = 'an empty config file' }
+            @{ Text = '{ "ExcludedModule": ["Contoso.Tools"] }'; What = 'a misspelled setting' }
+            @{ Text = '{ "LogRetentionDays": 0 }';               What = 'LogRetentionDays 0' })) {
+        $run = Invoke-WholeScript -ConfigText $case.Text -WithOldLog -Modules $installed
+        Assert-That ((Get-TouchingCalls $run.Calls).Count -eq 0) "$($case.What): no module is touched"
+        Assert-That ($run.OldLogKept) "$($case.What): and no log is removed"
+    }
 }
 finally {
     if (Test-Path -LiteralPath $root) {
