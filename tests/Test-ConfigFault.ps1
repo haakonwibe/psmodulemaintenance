@@ -269,7 +269,7 @@ try {
     $run = Invoke-WholeScript -ConfigText $goodConfig -WithOldLog -Modules $installed
     $removed = @($run.Calls | Where-Object { $_ -like 'Uninstall-PSResource*' } | Sort-Object)
     Assert-That ($run.ExitCode -ne 3) 'the stand-ins were in place'
-    Assert-That ($run.Log -contains '[INFO] Found 3 installed modules (excluding: )') 'the script sees the made-up modules, not the ones on this machine'
+    Assert-That ($run.Log -contains '[INFO] Found 3 installed modules') 'the script sees the made-up modules, not the ones on this machine'
     Assert-That ($run.Log -contains '[INFO] Starting module updates...') 'the update phase is entered'
     Assert-That ($run.Log -contains '[INFO] Starting old version cleanup...') 'the prune phase is entered'
     Assert-That (($removed -join '; ') -eq 'Uninstall-PSResource Contoso.Tools 5.7.1; Uninstall-PSResource Fabrikam.Core 1.0.0') "old versions are pruned: $($removed -join '; ')"
@@ -288,11 +288,12 @@ try {
     Assert-That (($removed -join '; ') -eq 'Uninstall-PSResource Fabrikam.Core 1.0.0') "the module the entry was about keeps all its versions, the others are pruned as usual: $($removed -join '; ')"
     Assert-That ($run.Log -contains "[ERROR] Contoso.Tools is left alone in this run, not updated and not pruned. A config entry for it is not understood (KeepVersions: '5.x' is not a version prefix such as 5 or 5.7)") 'the log says which module, and what is wrong with the entry'
     Assert-That ($run.Log -contains '[INFO]   - Modules left alone, entry not understood: 1') 'it is counted in the configuration that was loaded'
-    Assert-That ($run.Log -contains '[INFO] Found 2 installed modules (excluding: ; left alone, entry not understood: Contoso.Tools)') 'it is not among the modules that are looked at, and the count says why it is one short'
+    Assert-That ($run.Log -contains '[INFO] Found 2 installed modules (left alone, entry not understood: Contoso.Tools)') 'it is not among the modules that are looked at, and the count says why it is one short'
     Assert-That ($run.Log -contains '[WARN] PSModuleMaintenance completed with 1 unsuccessful operation(s) (config: 1, lookups: 0, updates: 0, pins: 0, prunes: 0)') 'the run does not end as a success'
     Assert-That ($run.Log -contains '[INFO] Toast notification sent: Updated 0 modules. Pruned 1 versions. 1 module(s) left alone, check config.json.') 'the toast points at the config'
     Assert-That ($run.Calls -contains 'ping https://hc.invalid/ping/made-up/fail') 'a fail ping is sent'
-    Assert-That (@($run.Calls | Where-Object { $_ -like 'body *config: Contoso.Tools left alone, entry not understood*' }).Count -eq 1) 'its body names the module'
+    Assert-That (@($run.Calls | Where-Object { $_ -like 'body *config: 1 module(s) left alone, entry not understood |       Contoso.Tools: KeepVersions*' }).Count -eq 1) 'its body names the module'
+    Assert-That (@($run.Calls | Where-Object { $_ -like 'body *Issues: 1 |*' }).Count -eq 1) 'and counts one issue, as the closing log line does'
     $summary = $run.SummaryText | ConvertFrom-Json
     Assert-That ((@($summary.ProtectedModules).Count -eq 1) -and ($summary.ProtectedModules[0].Module -eq 'Contoso.Tools')) 'the summary lists it'
     Assert-That ($null -eq $summary.ConfigFault) 'the file itself is not reported as unreadable'
@@ -300,6 +301,20 @@ try {
     $run = Invoke-WholeScript -ConfigText $oneBadEntry -Modules $installed -Mode 'PruneOnly'
     $removed = @($run.Calls | Where-Object { $_ -like 'Uninstall-PSResource*' })
     Assert-That (($removed -join '; ') -eq 'Uninstall-PSResource Fabrikam.Core 1.0.0') '-PruneOnly: the same'
+
+    # A module that is not installed does not explain the count, so it is not named there
+    $run = Invoke-WholeScript -ConfigText '{ "KeepVersions": { "Contoso.Tool": ["5.x"] } }' -Modules $installed
+    Assert-That ($run.Log -contains '[INFO] Found 3 installed modules') 'a protected module that is not installed is not named in the count'
+
+    # --- A pin for a module that is not installed ------------------------------------
+    Write-Section 'The whole script, with a pin for a module that is not installed'
+
+    # A misspelled name: the module it was meant for is pruned like any other. That cannot
+    # be prevented without knowing which module was meant, but it must not pass unseen
+    $run = Invoke-WholeScript -ConfigText '{ "PinnedModules": { "Contoso.Tool": "5.7.1" } }' -Modules $installed -Mode 'PruneOnly'
+    Assert-That ($run.Log -contains '[WARN] PinnedModules: Contoso.Tool is not installed, so the pin holds nothing. If the name is misspelled, the module it was meant for is pruned like any other') 'the prune phase warns, -PruneOnly included'
+    $run = Invoke-WholeScript -ConfigText '{ "PinnedModules": { "contoso.tools": "5.7.1" } }' -Modules $installed -Mode 'PruneOnly'
+    Assert-That (@($run.Log | Where-Object { $_ -like '*pin holds nothing*' }).Count -eq 0) 'a pin in other case is no typo, and does not warn'
 
     # --- A config that cannot be read ------------------------------------------------
     Write-Section 'The whole script, with a config that cannot be read'

@@ -334,6 +334,9 @@ $both = New-Summary
 $both.ModulesUnchecked = 150
 $both.KeepLinesUnchecked += @{ Module = 'Contoso.Tools'; Line = '5'; Fault = 'No such host is known' }
 Assert-That ((Get-SummaryFailures -Summary $both).Total -eq 1) 'together with an outage it is still one'
+$body = Format-HealthchecksBody -Summary $both -Mode 'Full' -IsFailure
+Assert-That ($body -like '*Issues: 1*') 'ping body: one issue for both'
+Assert-That ($body -like '*- lookup: 150 module(s) and 1 kept line(s) not checked: No such host is known*') 'ping body: on one line'
 
 $body = Format-HealthchecksBody -Summary $lines -Mode 'Full' -IsFailure
 Assert-That ($body -like '*lookup: 2 kept line(s) not checked: No such host is known*') 'ping body: names the kept lines'
@@ -400,8 +403,10 @@ $f = Get-SummaryFailures -Summary $protected
 Assert-That (($f.Config -eq 1) -and ($f.Total -eq 1)) "two modules left alone are one failure, it is the config that needs putting right (total $($f.Total))"
 
 $body = Format-HealthchecksBody -Summary $protected -Mode 'Full' -IsFailure
-Assert-That ($body -like "*- config: Contoso.Tools left alone, entry not understood: KeepVersions: '5.x' is not a version prefix such as 5 or 5.7*") 'ping body: names the module and what is wrong'
-Assert-That ($body -like '*- config: Fabrikam.Core left alone*') 'ping body: and the other one'
+Assert-That ($body -like '*- config: 2 module(s) left alone, entry not understood*') 'ping body: one issue line for both'
+Assert-That ($body -like "*      Contoso.Tools: KeepVersions: '5.x' is not a version prefix such as 5 or 5.7*") 'ping body: names the module and what is wrong'
+Assert-That ($body -like "*      Fabrikam.Core: PinnedModules: 'latest'*") 'ping body: and the other one'
+Assert-That ($body -like '*Issues: 1*') 'ping body: counts them as one issue, as the closing log line does'
 Assert-That ($body -like '*Updated: 2  Pruned: 1*') 'ping body: what was done for the other modules is still reported'
 
 $script:LogLines = @()

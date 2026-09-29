@@ -1116,11 +1116,11 @@ footer.footer {
         </div>
         <pre class="code"><span class="muted">PS&gt;</span> <span class="keyword">.\Invoke-PSModuleMaintenance.ps1</span>
 
-<span class="info">[INFO]</span> Found 78 installed modules (excluding: Az.Accounts)
+<span class="info">[INFO]</span> Found 64 installed modules (excluding: Northwind.Data)
 <span class="warn">[WARN]</span> Network fault on Contoso.Tools (attempt 1 of 3): ...
 <span class="ok">[SUCCESS]</span> Updated: Contoso.Tools (took 9s)
-<span class="info">[INFO]</span> Updating kept line 5 of Pester: 5.5.0 -&gt; 5.6.1
-<span class="ok">[SUCCESS]</span> Removed: Pester v5.5.0
+<span class="info">[INFO]</span> Updating kept line 5 of Fabrikam.Core: 5.5.0 -&gt; 5.6.1
+<span class="ok">[SUCCESS]</span> Removed: Fabrikam.Core v5.5.0
 <span class="info">[INFO]</span> Healthchecks ping sent: Success
 <span class="ok">[SUCCESS]</span> PSModuleMaintenance completed successfully</pre>
         <ul class="compare-points">
@@ -1194,7 +1194,7 @@ footer.footer {
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="m9 12 2 2 4-4"/></svg>
         </div>
         <h3>Failsafes</h3>
-        <p>Stops before any module is touched if <code class="inline">config.json</code> has errors.</p>
+        <p>Touches nothing if <code class="inline">config.json</code> can't be read. Skips a module whose entry is unclear.</p>
         <span class="feature-meta">8 built in</span>
       </div>
 
@@ -1388,7 +1388,7 @@ footer.footer {
         <div class="exception-meta">Hold one version</div>
         <div class="exception-name">PinnedModules</div>
 <pre><span class="key">"PinnedModules"</span><span class="muted">:</span> {
-  <span class="key">"Az.Accounts"</span><span class="muted">:</span> <span class="string">"2.19.0"</span>
+  <span class="key">"Contoso.Tools"</span><span class="muted">:</span> <span class="string">"2.19.0"</span>
 }</pre>
         <p>The pinned version is installed if it is missing, and newer versions are pruned. For a release that broke something.</p>
         <span class="exception-count">ONE VERSION</span>
@@ -1398,7 +1398,7 @@ footer.footer {
         <div class="exception-meta">Keep an older line</div>
         <div class="exception-name">KeepVersions</div>
 <pre><span class="key">"KeepVersions"</span><span class="muted">:</span> {
-  <span class="key">"Pester"</span><span class="muted">:</span> [<span class="string">"5"</span>]
+  <span class="key">"Fabrikam.Core"</span><span class="muted">:</span> [<span class="string">"5"</span>]
 }</pre>
         <p>The newest version and the 5 line are both kept, and both are updated, each within itself. For a breaking major release.</p>
         <span class="exception-count">TWO LINES, BOTH CURRENT</span>

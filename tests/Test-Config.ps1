@@ -170,6 +170,9 @@ try {
     Assert-That ($script:ProtectedModules.ContainsKey('Contoso.Tools')) 'a number where a quoted selector belongs: the module is protected'
     Assert-That ((@($script:ProtectedModules['Contoso.Tools']) -join ' ') -like '*has to be a string in quotes*') 'and the reason says to quote it'
 
+    Import-TestConfig '{ "KeepVersions": { "Contoso.Tools": ["5", null] } }'
+    Assert-That ($script:ProtectedModules.ContainsKey('Contoso.Tools')) 'a null in the list spoils the entry, as any other bad value does'
+
     Import-TestConfig '{ "KeepVersions": { "Contoso.Tools": [] } }'
     Assert-That ($script:ProtectedModules.ContainsKey('Contoso.Tools')) 'an entry with an empty list: the module is protected'
 

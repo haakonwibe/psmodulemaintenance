@@ -18,10 +18,10 @@ Automated PowerShell module maintenance for Windows. Updates all PSResourceGet-m
 - ⏰ **Scheduled Execution** — Runs weekly via Windows Task Scheduler
 - 🔔 **Toast Notifications** — Optional Windows toast notifications after each run
 - 🛡️ **Per-Module Timeout** — Each module update runs in an isolated runspace with a configurable timeout, preventing one slow module from blocking the entire run
-- 🔁 **Retry on Network Errors** — Retries an update up to three times on network errors
+- 🔁 **Retry on Network Errors** — Tries an update up to three times on network errors
 - 📡 **Healthchecks.io Monitoring** — Optional monitoring, alerts if a run fails or never starts
 - 🚦 **Error Reporting** — Errors show up in the log, the toast and the monitoring
-- 🧯 **Failsafes** — Stops before any module is touched if `config.json` has errors
+- 🧯 **Failsafes** — Touches nothing if `config.json` can't be read, and skips a module whose entry is unclear
 - 🤝 **Other Programs' Modules** — Leaves modules installed by other programs alone
 - 🧪 **Tests** — Test suite included, runs without network or elevation
 
@@ -207,7 +207,7 @@ entry was most likely there to keep.
 
 ```
 [ERROR] Contoso.Tools is left alone in this run, not updated and not pruned. A config entry for it is not understood (KeepVersions: '5.x' is not a version prefix such as 5 or 5.7)
-[INFO] Found 78 installed modules (excluding: Az.Accounts; left alone, entry not understood: Contoso.Tools)
+[INFO] Found 64 installed modules (excluding: Northwind.Data; left alone, entry not understood: Contoso.Tools)
 [WARN] PSModuleMaintenance completed with 1 unsuccessful operation(s) (config: 1, lookups: 0, updates: 0, pins: 0, prunes: 0)
 ```
 

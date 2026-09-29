@@ -193,6 +193,9 @@ function ConvertTo-KeepVersionTable {
         # @() also accepts a single value written without the list brackets
         foreach ($value in @($entry.Value)) {
             if ($null -eq $value) {
+                # A double comma, or a null written out. Skipping it would keep the rest of
+                # the entry, while any other bad value spoils it
+                $problems += 'the list has an empty value (null) in it'
                 continue
             }
             if ($value -isnot [string]) {
@@ -350,14 +353,12 @@ function Import-MaintenanceConfig {
                 $script:Config.ExcludedModules = $excluded
             }
 
-            $pinned = $jsonConfig.PinnedModules
-            if (($null -ne $pinned) -and (-not (($pinned -is [array]) -and ($pinned.Count -eq 0)))) {
-                $script:Config.PinnedModules = ConvertTo-PinnedModuleTable $pinned
+            $isNone = { param($value) ($null -eq $value) -or (($value -is [array]) -and ($value.Count -eq 0)) }
+            if (-not (& $isNone $jsonConfig.PinnedModules)) {
+                $script:Config.PinnedModules = ConvertTo-PinnedModuleTable $jsonConfig.PinnedModules
             }
-
-            $kept = $jsonConfig.KeepVersions
-            if (($null -ne $kept) -and (-not (($kept -is [array]) -and ($kept.Count -eq 0)))) {
-                $script:Config.KeepVersions = ConvertTo-KeepVersionTable $kept
+            if (-not (& $isNone $jsonConfig.KeepVersions)) {
+                $script:Config.KeepVersions = ConvertTo-KeepVersionTable $jsonConfig.KeepVersions
             }
             if ($null -ne $jsonConfig.LogRetentionDays) {
                 $script:Config.LogRetentionDays = $jsonConfig.LogRetentionDays
@@ -410,6 +411,7 @@ function Import-MaintenanceConfig {
                     continue
                 }
 
+                # This check is needed: @() of a missing entry is a list holding one null
                 if ($script:ProtectedModules.ContainsKey($name)) {
                     $script:ProtectedModules[$name] = @($script:ProtectedModules[$name]) + $what
                 }
@@ -417,12 +419,9 @@ function Import-MaintenanceConfig {
                     $script:ProtectedModules[$name] = @($what)
                 }
 
-                if ($script:Config.PinnedModules.ContainsKey($name)) {
-                    $script:Config.PinnedModules.Remove($name)
-                }
-                if ($script:Config.KeepVersions.ContainsKey($name)) {
-                    $script:Config.KeepVersions.Remove($name)
-                }
+                # Remove does nothing when the name is not there
+                $script:Config.PinnedModules.Remove($name)
+                $script:Config.KeepVersions.Remove($name)
             }
 
             Write-Verbose "Loaded configuration from: $Path"
@@ -896,19 +895,28 @@ function Format-HealthchecksBody {
         "Pins: $pinsEnforced enforced, $pinsSatisfied satisfied, $pinsHolding holding back"
     )
 
+    # One "  - " line per failure as Get-SummaryFailures counts them, so that the number
+    # after "Issues:" is the number of "  - " lines below it. The config and the lookup count
+    # once however many modules they concern, and each gets one line, with the modules
+    # it concerns indented under it
     $issues = @()
     if ($Summary.ConfigFault) {
         $issues += "  - config: could not be read, so nothing was updated or pruned: $($Summary.ConfigFault)"
     }
-    foreach ($item in @($Summary.ProtectedModules | Where-Object { $_ })) {
-        $issues += "  - config: $($item.Module) left alone, entry not understood: $($item.Problem)"
-    }
-    if ($Summary.ModulesUnchecked -gt 0) {
-        $issues += "  - lookup: $($Summary.ModulesUnchecked) module(s) not checked: $($Summary.GalleryFault)"
+    $protected = @($Summary.ProtectedModules | Where-Object { $_ })
+    if ($protected.Count -gt 0) {
+        $issues += "  - config: $($protected.Count) module(s) left alone, entry not understood"
+        foreach ($item in $protected) {
+            $issues += "      $($item.Module): $($item.Problem)"
+        }
     }
     $uncheckedLines = @($Summary.KeepLinesUnchecked | Where-Object { $_ })
-    if ($uncheckedLines.Count -gt 0) {
-        $issues += "  - lookup: $($uncheckedLines.Count) kept line(s) not checked: $($uncheckedLines[0].Fault)"
+    if (($Summary.ModulesUnchecked -gt 0) -or ($uncheckedLines.Count -gt 0)) {
+        $what = @()
+        if ($Summary.ModulesUnchecked -gt 0) { $what += "$($Summary.ModulesUnchecked) module(s)" }
+        if ($uncheckedLines.Count -gt 0) { $what += "$($uncheckedLines.Count) kept line(s)" }
+        $fault = if ($Summary.GalleryFault) { $Summary.GalleryFault } else { $uncheckedLines[0].Fault }
+        $issues += "  - lookup: $($what -join ' and ') not checked: $fault"
     }
     foreach ($item in @($Summary.ModulesFailed)) {
         $what = $item.Module
@@ -926,7 +934,8 @@ function Format-HealthchecksBody {
     }
 
     if ($issues.Count -gt 0) {
-        $lines += "Issues: $($issues.Count)"
+        # The count the closing log line and the toast use, not a count of lines
+        $lines += "Issues: $((Get-SummaryFailures -Summary $Summary).Total)"
         $lines += $issues
     }
     else {
@@ -2440,8 +2449,9 @@ function Update-AllModules {
     # When OneDrive is detected, modules live in AllUsers scope — query that explicitly
     $getParams = if ($useAllUsersScope) { @{ Scope = 'AllUsers' } } else { @{} }
     $untouched = @(Get-UntouchedModuleNames)
-    $allResources = @(Get-PSResource @getParams |
-        Where-Object { $_.Name -notin $untouched })
+    $everyResource = @(Get-PSResource @getParams)
+    $installedNames = @($everyResource | ForEach-Object { $_.Name })
+    $allResources = @($everyResource | Where-Object { $_.Name -notin $untouched })
 
     $installed = @($allResources |
         Group-Object Name |
@@ -2454,13 +2464,21 @@ function Update-AllModules {
     $script:Summary.ExcludedModules = @($script:Config.ExcludedModules)
 
     # A module left alone because of a config entry is missing from the count as well,
-    # so the line names it. Without one the line reads as it always has
-    $foundLine = "Found $($installed.Count) installed modules (excluding: $($script:Config.ExcludedModules -join ', ')"
-    if ($script:ProtectedModules.Count -gt 0) {
-        $leftAlone = @($script:ProtectedModules.Keys | Sort-Object) -join ', '
-        $foundLine += "; left alone, entry not understood: $leftAlone"
+    # so the line names it, but only if it is installed: one that is not installed does
+    # not explain the count. The brackets are left out when there is nothing to put in them
+    $leftAlone = @($script:ProtectedModules.Keys | Where-Object { $_ -in $installedNames } | Sort-Object)
+    $notCounted = @()
+    if (@($script:Config.ExcludedModules).Count -gt 0) {
+        $notCounted += "excluding: $($script:Config.ExcludedModules -join ', ')"
     }
-    Write-Log "$foundLine)"
+    if ($leftAlone.Count -gt 0) {
+        $notCounted += "left alone, entry not understood: $($leftAlone -join ', ')"
+    }
+    $foundLine = "Found $($installed.Count) installed modules"
+    if ($notCounted.Count -gt 0) {
+        $foundLine += " ($($notCounted -join '; '))"
+    }
+    Write-Log $foundLine
 
     # Pinned modules are held at a specific version — enforce those before updating anything
     $scope = if ($useAllUsersScope) { 'AllUsers' } else { $null }
@@ -2764,6 +2782,18 @@ function Remove-OldModuleVersions {
     # Say what KeepVersions protects before anything is removed. It sees the same list as
     # the loop below
     Confirm-KeptModuleVersions -InstalledResources @($nonOneDriveModules)
+
+    # A pin for a module that is not installed holds nothing. If its name is misspelled,
+    # the module it was meant for is pruned like any other, the pinned version with it.
+    # Which module that is cannot be known, so this is a WARN, like a KeepVersions entry
+    # for a module that is not installed. It is checked against every installed module,
+    # not only the prunable ones, so a module in OneDrive or under $PSHOME does not warn
+    $installedNames = @($allModules | ForEach-Object { $_.Name })
+    foreach ($pinName in @($script:Config.PinnedModules.Keys | Sort-Object)) {
+        if ($pinName -notin $installedNames) {
+            Write-Log "PinnedModules: $pinName is not installed, so the pin holds nothing. If the name is misspelled, the module it was meant for is pruned like any other" -Level WARN
+        }
+    }
 
     # @() matters: a single surviving group is a bare GroupInfo, whose own .Count member is
     # the number of versions in that group, not the number of groups
