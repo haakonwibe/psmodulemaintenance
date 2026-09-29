@@ -14,16 +14,16 @@ Automated PowerShell module maintenance for Windows. Updates all PSResourceGet-m
 - 📋 **Comprehensive Logging** — Structured logs with transcripts and JSON summaries
 - ⚙️ **Configurable Exclusions** — Skip specific modules via config file
 - 📌 **Version Pinning** — Hold specific modules at a chosen version instead of updating them
-- 🪜 **Side-by-Side Version Lines** — Keep an older major version next to the newest one, each updated within its own line
+- 🪜 **Side-by-Side Versions** — Keep an older major version next to the latest, both updated
 - ⏰ **Scheduled Execution** — Runs weekly via Windows Task Scheduler
 - 🔔 **Toast Notifications** — Optional Windows toast notifications after each run
 - 🛡️ **Per-Module Timeout** — Each module update runs in an isolated runspace with a configurable timeout, preventing one slow module from blocking the entire run
-- 🔁 **Retry on Network Faults** — A dropped connection or gateway hiccup is retried (up to three attempts) instead of costing the module a week
-- 📡 **Healthchecks.io Monitoring** — Optional dead-man's switch that alerts when a scheduled run never happens, not just when one fails
-- 🚦 **No False Green** — An unreachable PSGallery, a skipped module or a config problem is reported as unsuccessful in the log, the toast and the ping, never as "up to date"
-- 🧯 **Built-in Failsafes** — A typo in `config.json` never costs you a module: a file that cannot be read stops the run before anything is touched, and a bad entry takes only that module out of the run
-- 🤝 **Leaves Other Programs' Modules Alone** — A module that another program installed and maintains is neither migrated nor pruned
-- 🧪 **Tests Included** — The fault paths a normal run never reaches are covered by tests that need no network and no elevation
+- 🔁 **Retry on Network Errors** — Retries an update up to three times on network errors
+- 📡 **Healthchecks.io Monitoring** — Optional monitoring, alerts if a run fails or never starts
+- 🚦 **Error Reporting** — Errors show up in the log, the toast and the monitoring
+- 🧯 **Failsafes** — Stops before any module is touched if `config.json` has errors
+- 🤝 **Other Programs' Modules** — Leaves modules installed by other programs alone
+- 🧪 **Tests** — Test suite included, runs without network or elevation
 
 ## Requirements
 
